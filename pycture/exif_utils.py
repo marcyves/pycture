@@ -29,6 +29,21 @@ IMAGE_EXTENSIONS = {
     ".rw2",
 }
 
+# Vidéos (AVI et formats courants) → dossier année/video
+VIDEO_EXTENSIONS = {
+    ".avi",
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".mkv",
+    ".wmv",
+    ".mpg",
+    ".mpeg",
+    ".3gp",
+    ".mts",
+    ".m2ts",
+}
+
 # Fichiers macOS / système à ignorer (AppleDouble ._* , etc.)
 JUNK_FILENAMES = {
     ".ds_store",
@@ -56,6 +71,26 @@ def is_image(path: Path) -> bool:
     return path.suffix.lower() in IMAGE_EXTENSIONS
 
 
+def is_video(path: Path) -> bool:
+    if not path.is_file() or is_junk_file(path):
+        return False
+    return path.suffix.lower() in VIDEO_EXTENSIONS
+
+
+def is_media(path: Path) -> bool:
+    return is_image(path) or is_video(path)
+
+
+def _file_datetime(path: Path) -> datetime:
+    """Date de création du fichier si dispo, sinon date de modification."""
+    stat = path.stat()
+    # macOS / BSD : st_birthtime
+    birth = getattr(stat, "st_birthtime", None)
+    if birth:
+        return datetime.fromtimestamp(birth)
+    return datetime.fromtimestamp(stat.st_mtime)
+
+
 # Tags EXIF courants pour la date de prise de vue
 _DATE_TAGS = (
     "DateTimeOriginal",
@@ -75,7 +110,10 @@ def _parse_exif_datetime(value: str) -> datetime | None:
 
 
 def get_capture_datetime(path: Path) -> datetime:
-    """Retourne la date de prise de vue EXIF, sinon la date de modification du fichier."""
+    """Date de prise de vue EXIF pour les images ; date fichier pour les vidéos."""
+    if is_video(path):
+        return _file_datetime(path)
+
     try:
         with Image.open(path) as img:
             exif = img.getexif()
@@ -107,7 +145,7 @@ def get_capture_datetime(path: Path) -> datetime:
     except Exception:
         pass
 
-    return datetime.fromtimestamp(path.stat().st_mtime)
+    return _file_datetime(path)
 
 
 def format_datetime_for_filename(dt: datetime) -> str:

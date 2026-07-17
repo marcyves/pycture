@@ -13,6 +13,7 @@ from .exif_utils import (
     get_capture_datetime,
     is_image,
     is_junk_file,
+    is_video,
 )
 
 
@@ -38,6 +39,7 @@ class OrganizerOptions:
     dry_run: bool = True
     output_dir: Path | None = None  # None = réorganiser dans le dossier source
     clean_junk: bool = True  # supprimer ._* / .DS_Store etc.
+    include_videos: bool = True  # AVI etc. → année/video
 
 
 @dataclass
@@ -58,10 +60,13 @@ class OrganizerPlan:
     @property
     def summary(self) -> str:
         n_dupes = sum(len(g.duplicates) for g in self.duplicate_groups)
-        n_org = sum(1 for m in self.moves if m.reason in ("organisation", "doublon", "suppression"))
+        n_photos = sum(1 for m in self.moves if m.reason == "organisation")
+        n_videos = sum(1 for m in self.moves if m.reason == "video")
+        n_dup_actions = sum(1 for m in self.moves if m.reason in ("doublon", "suppression"))
         lines = [
-            f"Images à déplacer / renommer : {n_org}",
-            f"Groupes de doublons : {len(self.duplicate_groups)} ({n_dupes} fichiers en trop)",
+            f"Photos à déplacer / renommer : {n_photos}",
+            f"Vidéos → année/video : {n_videos}",
+            f"Actions doublons : {n_dup_actions} ({len(self.duplicate_groups)} groupes, {n_dupes} en trop)",
             f"Fichiers parasites (._* / système) : {len(self.junk_files)}",
             f"Ignorés : {len(self.skipped)}",
             f"Erreurs : {len(self.errors)}",
@@ -71,6 +76,16 @@ class OrganizerPlan:
 
 def collect_images(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*") if is_image(p))
+
+
+def collect_videos(root: Path) -> list[Path]:
+    return sorted(p for p in root.rglob("*") if is_video(p))
+
+
+def collect_media(root: Path, include_videos: bool = True) -> list[Path]:
+    return sorted(
+        p for p in root.rglob("*") if is_image(p) or (include_videos and is_video(p))
+    )
 
 
 def collect_junk_files(root: Path) -> list[Path]:
@@ -84,8 +99,11 @@ def _sanitize_name(name: str) -> str:
     return cleaned.strip(" .") or "sans_nom"
 
 
-def _target_folder(dt, options: OrganizerOptions, base: Path) -> Path:
+def _target_folder(dt, options: OrganizerOptions, base: Path, *, video: bool = False) -> Path:
     year = f"{dt.year:04d}"
+    if video:
+        return base / year / "video"
+
     month = f"{dt.month:02d}"
     day = f"{dt.day:02d}"
     event = _sanitize_name(options.event_name) if options.event_name else "Divers"
@@ -120,12 +138,12 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
         return plan
 
     base = (options.output_dir or source).resolve()
-    images = collect_images(source)
+    media = collect_media(source, include_videos=options.include_videos)
 
     if progress_cb:
-        progress_cb(0, max(len(images), 1), "Recherche des doublons…")
+        progress_cb(0, max(len(media), 1), "Recherche des doublons…")
 
-    plan.duplicate_groups = find_duplicates(images, progress_cb=progress_cb)
+    plan.duplicate_groups = find_duplicates(media, progress_cb=progress_cb)
 
     # Fichiers à exclure du déplacement principal (doublons non conservés)
     excluded: set[Path] = set()
@@ -134,10 +152,10 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
             for dup in group.duplicates:
                 excluded.add(dup.resolve())
 
-    total = len(images) or 1
+    total = len(media) or 1
     used_names: dict[Path, set[str]] = {}
 
-    for i, path in enumerate(images):
+    for i, path in enumerate(media):
         if progress_cb:
             progress_cb(i + 1, total, f"Analyse : {path.name}")
 
@@ -147,7 +165,9 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
 
         try:
             dt = get_capture_datetime(path)
-            folder = _target_folder(dt, options, base)
+            video = is_video(path)
+            folder = _target_folder(dt, options, base, video=video)
+            reason = "video" if video else "organisation"
 
             if options.rename_with_datetime:
                 new_name = f"{format_datetime_for_filename(dt)}{path.suffix.lower()}"
@@ -174,7 +194,7 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
                 plan.skipped.append((path, "Déjà à la bonne place"))
                 continue
 
-            plan.moves.append(PlannedMove(source=path, destination=dest, reason="organisation"))
+            plan.moves.append(PlannedMove(source=path, destination=dest, reason=reason))
         except Exception as exc:
             plan.errors.append((path, str(exc)))
 

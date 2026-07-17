@@ -13,7 +13,7 @@ from .organizer import (
     OrganizerOptions,
     OrganizerPlan,
     build_plan,
-    collect_images,
+    collect_media,
     execute_plan,
     remove_empty_dirs,
 )
@@ -112,12 +112,19 @@ class PyctureApp(tk.Tk):
         self.rename_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             opts,
-            text="Renommer les photos avec la date/heure (aaaa-mm-jj hh-mm-ss)",
+            text="Renommer avec la date/heure (aaaa-mm-jj hh-mm-ss)",
             variable=self.rename_var,
         ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=4)
 
+        self.videos_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opts,
+            text="Inclure les vidéos (AVI, MP4, …) → dossier année/video",
+            variable=self.videos_var,
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=4)
+
         ttk.Label(opts, text="Doublons (contenu identique) :").grid(
-            row=3, column=0, sticky=tk.W, pady=4
+            row=4, column=0, sticky=tk.W, pady=4
         )
         self.dup_var = tk.StringVar(value="Déplacer vers _doublons")
         self._dup_labels = {
@@ -132,21 +139,21 @@ class PyctureApp(tk.Tk):
             state="readonly",
             width=36,
             values=list(self._dup_labels.values()),
-        ).grid(row=3, column=1, sticky=tk.W, pady=4, padx=8)
+        ).grid(row=4, column=1, sticky=tk.W, pady=4, padx=8)
 
         self.clean_empty_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             opts,
             text="Supprimer les dossiers vides après organisation",
             variable=self.clean_empty_var,
-        ).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=4)
+        ).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=4)
 
         self.clean_junk_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             opts,
             text="Supprimer les fichiers parasites macOS (._* , .DS_Store, …)",
             variable=self.clean_junk_var,
-        ).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=4)
+        ).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=4)
 
         opts.columnconfigure(1, weight=1)
 
@@ -343,6 +350,7 @@ class PyctureApp(tk.Tk):
             dry_run=True,
             output_dir=output_dir,
             clean_junk=self.clean_junk_var.get(),
+            include_videos=self.videos_var.get(),
         )
 
     def _remember_current_paths(self) -> None:
@@ -364,7 +372,7 @@ class PyctureApp(tk.Tk):
 
         def worker() -> None:
             try:
-                images = collect_images(root)[:limit]
+                images = collect_media(root, include_videos=True)[:limit]
             except Exception:
                 images = []
             items = [(p, p.name, "") for p in images]
@@ -385,6 +393,9 @@ class PyctureApp(tk.Tk):
             if move.reason == "suppression":
                 caption = move.source.name
                 badge = "suppression"
+            elif move.reason == "video":
+                caption = f"{move.source.name} → {move.destination}"
+                badge = "vidéo"
             elif move.reason == "doublon":
                 caption = f"{move.source.name} → {move.destination.name}"
                 badge = "doublon"
@@ -485,6 +496,8 @@ class PyctureApp(tk.Tk):
                         parts.append("Action : suppression (doublon)")
                     elif move.reason == "junk":
                         parts.append("Action : suppression (fichier parasite macOS)")
+                    elif move.reason == "video":
+                        parts.append(f"Destination vidéo : {move.destination}")
                     else:
                         parts.append(f"Destination : {move.destination}")
                     break
@@ -535,6 +548,8 @@ class PyctureApp(tk.Tk):
                 self._append_log(f"SUPPRIMER  {move.source}")
             elif move.reason == "junk":
                 self._append_log(f"PARASITE   {move.source}")
+            elif move.reason == "video":
+                self._append_log(f"[vidéo] {move.source.name} → {move.destination}")
             else:
                 tag = "[doublon] " if move.reason == "doublon" else ""
                 self._append_log(f"{tag}{move.source.name} → {move.destination}")
