@@ -99,6 +99,28 @@ def _sanitize_name(name: str) -> str:
     return cleaned.strip(" .") or "sans_nom"
 
 
+def organization_base(source_dir: Path, output_dir: Path | None) -> Path:
+    """
+    Racine où créer année/mois/jour.
+
+    Si le dossier de travail s'appelle déjà une année (ex. .../Photos/2003),
+    on organise dans le parent (.../Photos) pour éviter .../2003/2003/09/10.
+    """
+    if output_dir is not None:
+        return output_dir.resolve()
+    source = source_dir.resolve()
+    if source.name.isdigit() and len(source.name) == 4:
+        return source.parent
+    return source
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve().as_posix().casefold() == b.resolve().as_posix().casefold()
+    except OSError:
+        return str(a).casefold() == str(b).casefold()
+
+
 def _target_folder(dt, options: OrganizerOptions, base: Path, *, video: bool = False) -> Path:
     year = f"{dt.year:04d}"
     if video:
@@ -137,7 +159,7 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
         plan.errors.append((source, "Dossier introuvable"))
         return plan
 
-    base = (options.output_dir or source).resolve()
+    base = organization_base(source, options.output_dir)
     media = collect_media(source, include_videos=options.include_videos)
 
     if progress_cb:
@@ -146,59 +168,16 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
     plan.duplicate_groups = find_duplicates(media, progress_cb=progress_cb)
 
     # Fichiers à exclure du déplacement principal (doublons non conservés)
-    excluded: set[Path] = set()
+    excluded: set[str] = set()
     if options.duplicate_action != DuplicateAction.KEEP_BOTH:
         for group in plan.duplicate_groups:
             for dup in group.duplicates:
-                excluded.add(dup.resolve())
+                try:
+                    excluded.add(str(dup.resolve()).casefold())
+                except OSError:
+                    excluded.add(str(dup).casefold())
 
-    total = len(media) or 1
-    used_names: dict[Path, set[str]] = {}
-
-    for i, path in enumerate(media):
-        if progress_cb:
-            progress_cb(i + 1, total, f"Analyse : {path.name}")
-
-        resolved = path.resolve()
-        if resolved in excluded:
-            continue
-
-        try:
-            dt = get_capture_datetime(path)
-            video = is_video(path)
-            folder = _target_folder(dt, options, base, video=video)
-            reason = "video" if video else "organisation"
-
-            if options.rename_with_datetime:
-                new_name = f"{format_datetime_for_filename(dt)}{path.suffix.lower()}"
-            else:
-                new_name = path.name
-
-            # Unicité dans le plan (avant écriture disque)
-            names = used_names.setdefault(folder, set())
-            candidate = folder / new_name
-            if new_name in names or (candidate.exists() and candidate.resolve() != resolved):
-                stem = Path(new_name).stem
-                suffix = Path(new_name).suffix
-                n = 1
-                while True:
-                    alt = f"{stem}_{n}{suffix}"
-                    if alt not in names and not (folder / alt).exists():
-                        new_name = alt
-                        break
-                    n += 1
-            names.add(new_name)
-
-            dest = folder / new_name
-            if dest.resolve() == resolved:
-                plan.skipped.append((path, "Déjà à la bonne place"))
-                continue
-
-            plan.moves.append(PlannedMove(source=path, destination=dest, reason=reason))
-        except Exception as exc:
-            plan.errors.append((path, str(exc)))
-
-    # Doublons : déplacement vers _doublons ou suppression
+    # 1) Traiter d'abord les doublons (libère les chemins cibles)
     if options.duplicate_action == DuplicateAction.MOVE_TO_DOUBLONS:
         doublons_dir = base / "_doublons"
         for group in plan.duplicate_groups:
@@ -214,21 +193,98 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
                     PlannedMove(source=dup, destination=Path(), reason="suppression")
                 )
 
+    vacating = {
+        str(m.source.resolve()).casefold()
+        for m in plan.moves
+        if m.reason in ("doublon", "suppression")
+    }
+
+    # 2) Organiser les fichiers conservés
+    total = len(media) or 1
+    used_names: dict[Path, set[str]] = {}
+
+    for i, path in enumerate(media):
+        if progress_cb:
+            progress_cb(i + 1, total, f"Analyse : {path.name}")
+
+        try:
+            resolved_key = str(path.resolve()).casefold()
+        except OSError:
+            resolved_key = str(path).casefold()
+        if resolved_key in excluded:
+            continue
+
+        try:
+            dt = get_capture_datetime(path)
+            video = is_video(path)
+            folder = _target_folder(dt, options, base, video=video)
+            reason = "video" if video else "organisation"
+
+            if options.rename_with_datetime:
+                new_name = f"{format_datetime_for_filename(dt)}{path.suffix.lower()}"
+            else:
+                new_name = path.name
+
+            names = used_names.setdefault(folder, set())
+            candidate = folder / new_name
+            conflict = False
+            if new_name in names:
+                conflict = True
+            elif candidate.exists():
+                try:
+                    cand_key = str(candidate.resolve()).casefold()
+                except OSError:
+                    cand_key = str(candidate).casefold()
+                if cand_key != resolved_key and cand_key not in vacating:
+                    conflict = True
+
+            if conflict:
+                stem = Path(new_name).stem
+                suffix = Path(new_name).suffix
+                n = 1
+                while True:
+                    alt = f"{stem}_{n}{suffix}"
+                    alt_path = folder / alt
+                    taken = alt in names
+                    if not taken and alt_path.exists():
+                        try:
+                            alt_key = str(alt_path.resolve()).casefold()
+                        except OSError:
+                            alt_key = str(alt_path).casefold()
+                        if alt_key != resolved_key and alt_key not in vacating:
+                            taken = True
+                    if not taken:
+                        new_name = alt
+                        break
+                    n += 1
+            names.add(new_name)
+
+            dest = folder / new_name
+            if _same_file(dest, path):
+                plan.skipped.append((path, "Déjà à la bonne place"))
+                continue
+
+            plan.moves.append(PlannedMove(source=path, destination=dest, reason=reason))
+        except Exception as exc:
+            plan.errors.append((path, str(exc)))
+
     # Fichiers parasites macOS (._* , .DS_Store, …)
     if options.clean_junk:
-        # Chercher dans source et destination éventuelle
-        roots = {source}
+        roots = {source, base}
         if options.output_dir:
             out = options.output_dir.resolve()
             if out.is_dir():
                 roots.add(out)
         junk: list[Path] = []
         for root in roots:
-            junk.extend(collect_junk_files(root))
-        # Dédupliquer
-        seen: set[Path] = set()
+            if root.is_dir():
+                junk.extend(collect_junk_files(root))
+        seen: set[str] = set()
         for j in junk:
-            rj = j.resolve()
+            try:
+                rj = str(j.resolve()).casefold()
+            except OSError:
+                rj = str(j).casefold()
             if rj in seen:
                 continue
             seen.add(rj)
@@ -265,7 +321,10 @@ def execute_plan(plan: OrganizerPlan, dry_run: bool = True, progress_cb=None) ->
             logs.append(msg)
             if not dry_run:
                 try:
-                    move.source.unlink()
+                    if move.source.is_file():
+                        move.source.unlink()
+                    else:
+                        logs.append("  (fichier déjà absent)")
                 except OSError as exc:
                     logs.append(f"  ERREUR : {exc}")
             continue
@@ -276,9 +335,21 @@ def execute_plan(plan: OrganizerPlan, dry_run: bool = True, progress_cb=None) ->
             continue
 
         try:
+            if not move.source.is_file():
+                logs.append("  ERREUR : source introuvable (déjà déplacé ?)")
+                continue
             move.destination.parent.mkdir(parents=True, exist_ok=True)
-            dest = _unique_destination(move.destination)
-            # Nettoyer les sidecars avant/après déplacement
+            # Sur volume insensible à la casse, éviter d'écraser la source
+            if _same_file(move.source, move.destination):
+                # Simple changement de casse éventuel via fichier temporaire
+                if move.source.name != move.destination.name:
+                    tmp = move.source.with_name(f".__pycture_tmp__{move.source.name}")
+                    shutil.move(str(move.source), str(tmp))
+                    shutil.move(str(tmp), str(move.destination))
+                continue
+            dest = move.destination
+            if dest.exists() and not _same_file(move.source, dest):
+                dest = _unique_destination(dest)
             _remove_appledouble_sidecar(move.source)
             shutil.move(str(move.source), str(dest))
             _remove_appledouble_sidecar(dest)

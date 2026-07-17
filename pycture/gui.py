@@ -536,8 +536,26 @@ class PyctureApp(tk.Tk):
 
         if plan.duplicate_groups:
             self._append_log("--- Doublons détectés ---")
+            # Index destination finale du fichier conservé (s'il est déplacé)
+            final_by_source = {
+                str(m.source.resolve()).casefold(): m.destination
+                for m in plan.moves
+                if m.reason in ("organisation", "video")
+            }
             for g in plan.duplicate_groups:
-                self._append_log(f"  Conservé : {g.keeper}")
+                keep = g.keeper
+                if keep is None:
+                    continue
+                try:
+                    keep_key = str(keep.resolve()).casefold()
+                except OSError:
+                    keep_key = str(keep).casefold()
+                final = final_by_source.get(keep_key)
+                if final and str(final) != str(keep):
+                    self._append_log(f"  Conservé : {keep}")
+                    self._append_log(f"           → sera déplacé vers : {final}")
+                else:
+                    self._append_log(f"  Conservé : {keep}")
                 for d in g.duplicates:
                     self._append_log(f"  Doublon  : {d}")
             self._append_log("")

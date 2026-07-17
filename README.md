@@ -8,6 +8,7 @@ Application GUI Python pour nettoyer et organiser un dossier de photos (et ses s
   - `année / mois / jour`
   - `année / mois / événement`
   - `année / événement`
+- Si le dossier choisi s'appelle déjà une année (`…/2003`), l'organisation se fait dans le **dossier parent** (évite `2003/2003/…`)
 - Vidéos (AVI, MP4, MOV, …) regroupées dans `année / video`
 - Renommage optionnel au format `aaaa-mm-jj hh-mm-ss` (date EXIF, sinon date de fichier)
 - Détection des doublons (empreinte SHA-256) : déplacement vers `_doublons`, suppression, ou conservation

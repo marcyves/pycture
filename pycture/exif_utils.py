@@ -8,6 +8,11 @@ from pathlib import Path
 from PIL import Image
 from PIL.ExifTags import TAGS
 
+try:
+    from PIL.ExifTags import IFD
+except ImportError:  # pragma: no cover
+    IFD = None  # type: ignore[misc, assignment]
+
 # Extensions d'images supportées
 IMAGE_EXTENSIONS = {
     ".jpg",
@@ -52,6 +57,11 @@ JUNK_FILENAMES = {
     ".localized",
 }
 
+# IDs EXIF
+_TAG_DATETIME = 306  # DateTime — souvent date de dernier enregistrement logiciel
+_TAG_DATETIME_ORIGINAL = 36867  # DateTimeOriginal — vraie prise de vue
+_TAG_DATETIME_DIGITIZED = 36868  # DateTimeDigitized — numérisation
+
 
 def is_junk_file(path: Path) -> bool:
     """True pour les métadonnées macOS (._*) et autres fichiers système parasites."""
@@ -82,25 +92,16 @@ def is_media(path: Path) -> bool:
 
 
 def _file_datetime(path: Path) -> datetime:
-    """Date de création du fichier si dispo, sinon date de modification."""
-    stat = path.stat()
-    # macOS / BSD : st_birthtime
-    birth = getattr(stat, "st_birthtime", None)
-    if birth:
-        return datetime.fromtimestamp(birth)
-    return datetime.fromtimestamp(stat.st_mtime)
+    """Date de modification du fichier (dernier recours)."""
+    return datetime.fromtimestamp(path.stat().st_mtime)
 
 
-# Tags EXIF courants pour la date de prise de vue
-_DATE_TAGS = (
-    "DateTimeOriginal",
-    "DateTimeDigitized",
-    "DateTime",
-)
-
-
-def _parse_exif_datetime(value: str) -> datetime | None:
+def _parse_exif_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
     value = value.strip()
+    if not value or value.startswith("0000"):
+        return None
     for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y:%m:%d"):
         try:
             return datetime.strptime(value, fmt)
@@ -109,8 +110,56 @@ def _parse_exif_datetime(value: str) -> datetime | None:
     return None
 
 
+def _datetime_from_exif_ifd(exif) -> datetime | None:
+    """Priorité : DateTimeOriginal → DateTimeDigitized (IFD Exif)."""
+    if IFD is None:
+        return None
+    try:
+        ifd = exif.get_ifd(IFD.Exif)
+    except Exception:
+        return None
+    for tag_id in (_TAG_DATETIME_ORIGINAL, _TAG_DATETIME_DIGITIZED):
+        parsed = _parse_exif_datetime(ifd.get(tag_id))
+        if parsed:
+            return parsed
+    return None
+
+
+def _datetime_from_getexif_flat(img: Image.Image) -> datetime | None:
+    """Fallback via _getexif() (dict plat, ancien API Pillow)."""
+    try:
+        raw = img._getexif()  # noqa: SLF001
+    except Exception:
+        return None
+    if not raw:
+        return None
+    # Priorité prise de vue, puis numérisation — JAMAIS DateTime en premier
+    for tag_id in (_TAG_DATETIME_ORIGINAL, _TAG_DATETIME_DIGITIZED):
+        parsed = _parse_exif_datetime(raw.get(tag_id))
+        if parsed:
+            return parsed
+    return None
+
+
+def _datetime_from_root_datetime(exif) -> datetime | None:
+    """DateTime (306) : dernier recours EXIF (souvent date d'édition, pas de prise de vue)."""
+    parsed = _parse_exif_datetime(exif.get(_TAG_DATETIME))
+    if parsed:
+        return parsed
+    tagged = {TAGS.get(k, k): v for k, v in exif.items()}
+    return _parse_exif_datetime(tagged.get("DateTime"))
+
+
 def get_capture_datetime(path: Path) -> datetime:
-    """Date de prise de vue EXIF pour les images ; date fichier pour les vidéos."""
+    """
+    Date de prise de vue.
+
+    Ordre strict :
+    1. EXIF DateTimeOriginal
+    2. EXIF DateTimeDigitized
+    3. EXIF DateTime (tag 306, souvent incorrect)
+    4. Date de modification du fichier
+    """
     if is_video(path):
         return _file_datetime(path)
 
@@ -118,30 +167,18 @@ def get_capture_datetime(path: Path) -> datetime:
         with Image.open(path) as img:
             exif = img.getexif()
             if exif:
-                tagged = {TAGS.get(k, k): v for k, v in exif.items()}
-                for tag in _DATE_TAGS:
-                    raw = tagged.get(tag)
-                    if isinstance(raw, str):
-                        parsed = _parse_exif_datetime(raw)
-                        if parsed:
-                            return parsed
+                dt = _datetime_from_exif_ifd(exif)
+                if dt:
+                    return dt
 
-                # EXIF IFD (Pillow >= 8)
-                try:
-                    from PIL.ExifTags import IFD
+            dt = _datetime_from_getexif_flat(img)
+            if dt:
+                return dt
 
-                    ifd = exif.get_ifd(IFD.Exif)
-                    for tag_id, name in (
-                        (36867, "DateTimeOriginal"),
-                        (36868, "DateTimeDigitized"),
-                    ):
-                        raw = ifd.get(tag_id)
-                        if isinstance(raw, str):
-                            parsed = _parse_exif_datetime(raw)
-                            if parsed:
-                                return parsed
-                except Exception:
-                    pass
+            if exif:
+                dt = _datetime_from_root_datetime(exif)
+                if dt:
+                    return dt
     except Exception:
         pass
 
