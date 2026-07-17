@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
 from .duplicates import DuplicateGroup, find_duplicates
 from .exif_utils import (
     format_datetime_for_filename,
-    get_capture_datetime,
+    get_capture_info,
     is_image,
     is_junk_file,
     is_video,
+    set_file_datetime,
 )
 
 
@@ -40,6 +42,7 @@ class OrganizerOptions:
     output_dir: Path | None = None  # None = réorganiser dans le dossier source
     clean_junk: bool = True  # supprimer ._* / .DS_Store etc.
     include_videos: bool = True  # AVI etc. → année/video
+    sync_file_dates: bool = True  # aligner mtime/création sur EXIF
 
 
 @dataclass
@@ -47,6 +50,7 @@ class PlannedMove:
     source: Path
     destination: Path
     reason: str = ""
+    capture_dt: datetime | None = None
 
 
 @dataclass
@@ -62,10 +66,14 @@ class OrganizerPlan:
         n_dupes = sum(len(g.duplicates) for g in self.duplicate_groups)
         n_photos = sum(1 for m in self.moves if m.reason == "organisation")
         n_videos = sum(1 for m in self.moves if m.reason == "video")
+        n_sans = sum(1 for m in self.moves if m.reason == "sans_exif")
+        n_sync = sum(1 for m in self.moves if m.reason == "sync_dates")
         n_dup_actions = sum(1 for m in self.moves if m.reason in ("doublon", "suppression"))
         lines = [
             f"Photos à déplacer / renommer : {n_photos}",
+            f"Sans EXIF (→ année/_sans_exif) : {n_sans}",
             f"Vidéos → année/video : {n_videos}",
+            f"Dates fichier à aligner sur EXIF : {n_sync}",
             f"Actions doublons : {n_dup_actions} ({len(self.duplicate_groups)} groupes, {n_dupes} en trop)",
             f"Fichiers parasites (._* / système) : {len(self.junk_files)}",
             f"Ignorés : {len(self.skipped)}",
@@ -121,7 +129,32 @@ def _same_file(a: Path, b: Path) -> bool:
         return str(a).casefold() == str(b).casefold()
 
 
-def _target_folder(dt, options: OrganizerOptions, base: Path, *, video: bool = False) -> Path:
+def _source_year_hint(source_dir: Path) -> int | None:
+    """Si le dossier de travail s'appelle YYYY, retourne cette année."""
+    name = source_dir.resolve().name
+    if name.isdigit() and len(name) == 4:
+        year = int(name)
+        if 1980 <= year <= 2100:
+            return year
+    return None
+
+
+def _target_folder(
+    dt,
+    options: OrganizerOptions,
+    base: Path,
+    *,
+    video: bool = False,
+    no_exif: bool = False,
+    year_hint: int | None = None,
+) -> Path:
+    """
+    Sans EXIF fiable et avec un dossier année source : année/_sans_exif
+    (évite d'envoyer des scans/exports vers l'année de la date fichier, ex. 2022).
+    """
+    if no_exif and year_hint is not None and not video:
+        return base / f"{year_hint:04d}" / "_sans_exif"
+
     year = f"{dt.year:04d}"
     if video:
         return base / year / "video"
@@ -160,6 +193,7 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
         return plan
 
     base = organization_base(source, options.output_dir)
+    year_hint = _source_year_hint(source)
     media = collect_media(source, include_videos=options.include_videos)
 
     if progress_cb:
@@ -215,12 +249,41 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
             continue
 
         try:
-            dt = get_capture_datetime(path)
+            capture = get_capture_info(path)
+            dt = capture.value
             video = is_video(path)
-            folder = _target_folder(dt, options, base, video=video)
-            reason = "video" if video else "organisation"
 
-            if options.rename_with_datetime:
+            # Dossier année (ex. 2005) : ne pas sortir vers une autre année
+            # sauf EXIF Original/Digitized fiable.
+            force_sans_exif = False
+            if year_hint is not None and not video and dt.year != year_hint:
+                if capture.source in ("exif_original", "exif_digitized"):
+                    force_sans_exif = False  # on fait confiance à l'EXIF
+                else:
+                    # mtime, DateTime faible, ou nom avec une autre année → rester
+                    force_sans_exif = True
+
+            folder = _target_folder(
+                dt,
+                options,
+                base,
+                video=video,
+                no_exif=force_sans_exif,
+                year_hint=year_hint,
+            )
+            if video:
+                reason = "video"
+            elif force_sans_exif:
+                reason = "sans_exif"
+            else:
+                reason = "organisation"
+
+            # Renommer seulement avec une date fiable (EXIF prise de vue ou nom)
+            if (
+                options.rename_with_datetime
+                and capture.is_reliable
+                and not force_sans_exif
+            ):
                 new_name = f"{format_datetime_for_filename(dt)}{path.suffix.lower()}"
             else:
                 new_name = path.name
@@ -260,11 +323,29 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
             names.add(new_name)
 
             dest = folder / new_name
+            sync_dt = dt if capture.is_reliable and not force_sans_exif else None
+
             if _same_file(dest, path):
                 plan.skipped.append((path, "Déjà à la bonne place"))
+                if options.sync_file_dates and sync_dt is not None:
+                    plan.moves.append(
+                        PlannedMove(
+                            source=path,
+                            destination=path,
+                            reason="sync_dates",
+                            capture_dt=sync_dt,
+                        )
+                    )
                 continue
 
-            plan.moves.append(PlannedMove(source=path, destination=dest, reason=reason))
+            plan.moves.append(
+                PlannedMove(
+                    source=path,
+                    destination=dest,
+                    reason=reason,
+                    capture_dt=sync_dt,
+                )
+            )
         except Exception as exc:
             plan.errors.append((path, str(exc)))
 
@@ -306,7 +387,13 @@ def _remove_appledouble_sidecar(path: Path) -> None:
         pass
 
 
-def execute_plan(plan: OrganizerPlan, dry_run: bool = True, progress_cb=None) -> list[str]:
+def execute_plan(
+    plan: OrganizerPlan,
+    dry_run: bool = True,
+    progress_cb=None,
+    *,
+    sync_file_dates: bool = True,
+) -> list[str]:
     """Exécute le plan. Retourne une liste de messages de log."""
     logs: list[str] = []
     total = len(plan.moves) or 1
@@ -314,6 +401,16 @@ def execute_plan(plan: OrganizerPlan, dry_run: bool = True, progress_cb=None) ->
     for i, move in enumerate(plan.moves):
         if progress_cb:
             progress_cb(i + 1, total, f"{move.source.name}")
+
+        if move.reason == "sync_dates":
+            msg = f"DATES EXIF → fichier {move.source}"
+            logs.append(msg)
+            if not dry_run and move.capture_dt is not None and move.source.is_file():
+                try:
+                    set_file_datetime(move.source, move.capture_dt)
+                except OSError as exc:
+                    logs.append(f"  ERREUR dates : {exc}")
+            continue
 
         if move.reason in ("suppression", "junk"):
             label = "PARASITE" if move.reason == "junk" else "SUPPRIMER"
@@ -341,20 +438,30 @@ def execute_plan(plan: OrganizerPlan, dry_run: bool = True, progress_cb=None) ->
             move.destination.parent.mkdir(parents=True, exist_ok=True)
             # Sur volume insensible à la casse, éviter d'écraser la source
             if _same_file(move.source, move.destination):
-                # Simple changement de casse éventuel via fichier temporaire
                 if move.source.name != move.destination.name:
                     tmp = move.source.with_name(f".__pycture_tmp__{move.source.name}")
                     shutil.move(str(move.source), str(tmp))
                     shutil.move(str(tmp), str(move.destination))
-                continue
-            dest = move.destination
-            if dest.exists() and not _same_file(move.source, dest):
-                dest = _unique_destination(dest)
-            _remove_appledouble_sidecar(move.source)
-            shutil.move(str(move.source), str(dest))
-            _remove_appledouble_sidecar(dest)
-            if dest != move.destination:
-                logs.append(f"  (renommé en {dest.name} pour éviter un conflit)")
+                final = move.destination
+            else:
+                dest = move.destination
+                if dest.exists() and not _same_file(move.source, dest):
+                    dest = _unique_destination(dest)
+                _remove_appledouble_sidecar(move.source)
+                shutil.move(str(move.source), str(dest))
+                _remove_appledouble_sidecar(dest)
+                if dest != move.destination:
+                    logs.append(f"  (renommé en {dest.name} pour éviter un conflit)")
+                final = dest
+
+            if sync_file_dates and move.capture_dt is not None and final.is_file():
+                try:
+                    set_file_datetime(final, move.capture_dt)
+                    logs.append(
+                        f"  dates fichier → {move.capture_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                except OSError as exc:
+                    logs.append(f"  ERREUR dates : {exc}")
         except OSError as exc:
             logs.append(f"  ERREUR : {exc}")
 

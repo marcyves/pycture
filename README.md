@@ -11,6 +11,9 @@ Application GUI Python pour nettoyer et organiser un dossier de photos (et ses s
 - Si le dossier choisi s'appelle déjà une année (`…/2003`), l'organisation se fait dans le **dossier parent** (évite `2003/2003/…`)
 - Vidéos (AVI, MP4, MOV, …) regroupées dans `année / video`
 - Renommage optionnel au format `aaaa-mm-jj hh-mm-ss` (date EXIF, sinon date de fichier)
+- Alignement optionnel des dates filesystem (création / modification) sur l'EXIF **uniquement** quand une date EXIF existe
+- Sans date EXIF fiable : date lue dans le **nom de fichier** si elle y figure (`2005-08-15 14-30-22`, `20050815_143022`, …)
+- Sans EXIF ni date dans le nom : si vous travaillez dans un dossier année (`2005`), les fichiers vont dans `2005/_sans_exif` (on ne sort pas vers l'année de la date fichier)
 - Détection des doublons (empreinte SHA-256) : déplacement vers `_doublons`, suppression, ou conservation
 - Suppression des fichiers parasites macOS (`._*`, `.DS_Store`, …)
 - Nettoyage des dossiers vides

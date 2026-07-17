@@ -155,6 +155,13 @@ class PyctureApp(tk.Tk):
             variable=self.clean_junk_var,
         ).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=4)
 
+        self.sync_dates_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opts,
+            text="Aligner les dates du fichier (création/modif.) sur l'EXIF",
+            variable=self.sync_dates_var,
+        ).grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=4)
+
         opts.columnconfigure(1, weight=1)
 
         # Actions
@@ -351,6 +358,7 @@ class PyctureApp(tk.Tk):
             output_dir=output_dir,
             clean_junk=self.clean_junk_var.get(),
             include_videos=self.videos_var.get(),
+            sync_file_dates=self.sync_dates_var.get(),
         )
 
     def _remember_current_paths(self) -> None:
@@ -390,9 +398,14 @@ class PyctureApp(tk.Tk):
         for move in plan.moves:
             if move.reason == "junk":
                 continue  # listés dans le journal seulement
+            if move.reason == "sync_dates":
+                continue
             if move.reason == "suppression":
                 caption = move.source.name
                 badge = "suppression"
+            elif move.reason == "sans_exif":
+                caption = f"{move.source.name} → {move.destination}"
+                badge = "sans EXIF"
             elif move.reason == "video":
                 caption = f"{move.source.name} → {move.destination}"
                 badge = "vidéo"
@@ -496,6 +509,8 @@ class PyctureApp(tk.Tk):
                         parts.append("Action : suppression (doublon)")
                     elif move.reason == "junk":
                         parts.append("Action : suppression (fichier parasite macOS)")
+                    elif move.reason == "sans_exif":
+                        parts.append(f"Sans EXIF → {move.destination}")
                     elif move.reason == "video":
                         parts.append(f"Destination vidéo : {move.destination}")
                     else:
@@ -566,6 +581,15 @@ class PyctureApp(tk.Tk):
                 self._append_log(f"SUPPRIMER  {move.source}")
             elif move.reason == "junk":
                 self._append_log(f"PARASITE   {move.source}")
+            elif move.reason == "sync_dates":
+                when = (
+                    move.capture_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    if move.capture_dt
+                    else "?"
+                )
+                self._append_log(f"DATES      {move.source.name} → {when}")
+            elif move.reason == "sans_exif":
+                self._append_log(f"[sans EXIF] {move.source.name} → {move.destination}")
             elif move.reason == "video":
                 self._append_log(f"[vidéo] {move.source.name} → {move.destination}")
             else:
@@ -622,7 +646,12 @@ class PyctureApp(tk.Tk):
 
         def worker() -> None:
             try:
-                logs = execute_plan(plan, dry_run=False, progress_cb=self._progress_cb)
+                logs = execute_plan(
+                    plan,
+                    dry_run=False,
+                    progress_cb=self._progress_cb,
+                    sync_file_dates=options.sync_file_dates,
+                )
                 removed: list[Path] = []
                 if self.clean_empty_var.get():
                     root = (options.output_dir or options.source_dir).resolve()
