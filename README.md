@@ -2,6 +2,12 @@
 
 Application GUI Python pour nettoyer et organiser un dossier de photos (et ses sous-dossiers).
 
+**Dépôt :** [github.com/marcyves/pycture](https://github.com/marcyves/pycture)
+
+[![Issues](https://img.shields.io/github/issues/marcyves/pycture?style=flat-square)](https://github.com/marcyves/pycture/issues)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg?style=flat-square)](./LICENSE)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Marc%20Augier-0A66C2?style=flat-square&logo=linkedin)](https://linkedin.com/in/marcaugier)
+
 ## Fonctionnalités
 
 - Organisation des photos en dossiers :
@@ -10,15 +16,57 @@ Application GUI Python pour nettoyer et organiser un dossier de photos (et ses s
   - `année / événement`
 - Si le dossier choisi s'appelle déjà une année (`…/2003`), l'organisation se fait dans le **dossier parent** (évite `2003/2003/…`)
 - Vidéos (AVI, MP4, MOV, …) regroupées dans `année / video`
-- Renommage optionnel au format `aaaa-mm-jj hh-mm-ss` (date EXIF, sinon date de fichier)
-- Alignement optionnel des dates filesystem (création / modification) sur l'EXIF **uniquement** quand une date EXIF existe
-- Sans date EXIF fiable : date lue dans le **nom de fichier** si elle y figure (`2005-08-15 14-30-22`, `20050815_143022`, …)
-- Sans EXIF ni date dans le nom : si vous travaillez dans un dossier année (`2005`), les fichiers vont dans `2005/_sans_exif` (on ne sort pas vers l'année de la date fichier)
-- Détection des doublons (empreinte SHA-256) : déplacement vers `_doublons`, suppression, ou conservation
+- Renommage optionnel au format `aaaa-mm-jj hh-mm-ss`
+- Alignement optionnel des dates filesystem (création / modification) sur une date fiable
+- Détection des doublons (empreinte SHA-256 du fichier) : `_doublons`, suppression, ou conservation
 - Suppression des fichiers parasites macOS (`._*`, `.DS_Store`, …)
 - Nettoyage des dossiers vides
 - Aperçu avant application + miniatures
 - Mémorisation du dernier dossier utilisé (`~/.pycture/settings.json`)
+
+## Stratégie de datation
+
+Pour ranger / renommer une photo, Pycture choisit une date dans cet ordre :
+
+1. **EXIF `DateTimeOriginal`** (prise de vue)
+2. **EXIF `DateTimeDigitized`**
+3. **Date explicite dans le nom de fichier**  
+   ex. `2005-08-15 14-30-22`, `20050815_143022`, `2005-08-15`
+4. **EXIF `DateTime`** (souvent une date d’édition — peu fiable)
+5. **Date de modification du fichier** (mtime — souvent une date d’export / copie)
+
+### Cas particuliers
+
+- L’alignement des dates filesystem et le renommage « date/heure » ne s’appliquent que si la date est **fiable** (EXIF prise de vue / numérisation, ou date dans le nom).
+- Si vous travaillez dans un dossier nommé comme une année (`…/Photos/2005`) :
+  - une date fiable d’une **autre** année provenant seulement du mtime, d’un `DateTime` faible, ou d’un nom « mauvaise année » → le fichier reste dans `2005/_sans_exif` (on ne sort pas du dossier année) ;
+  - un vrai `DateTimeOriginal` / `Digitized` d’une autre année peut encore classer la photo hors de `2005` (EXIF prioritaire).
+
+## Stratégie des doublons
+
+### Qu’est-ce qu’un doublon ?
+
+Deux fichiers sont des doublons si et seulement si leur **contenu binaire est identique** :
+
+1. même **taille** (filtre rapide) ;
+2. même empreinte **SHA-256** calculée sur **tout le fichier**.
+
+Conséquences importantes :
+
+- Même empreinte ⇒ **mêmes octets** ⇒ même image **et** mêmes métadonnées EXIF embarquées.
+- On ne peut **pas** avoir la même empreinte et un EXIF différent : l’EXIF fait partie du fichier.
+- En revanche, le **nom** et le **dossier** peuvent différer (`CER105.JPG` vs `2003-09-10 14-57-58.jpg`) tout en étant la même copie bit à bit.
+- Ce ne sont **pas** des doublons : même scène recompressée, redimensionnée, ou avec EXIF modifié (l’empreinte change).
+
+### Quelle copie est conservée ?
+
+Dans un groupe de fichiers identiques, Pycture garde en priorité :
+
+1. un nom qui n’est **pas** déjà au format `aaaa-mm-jj hh-mm-ss` ;
+2. le fichier au **mtime** le plus ancien ;
+3. le chemin le plus court.
+
+Les autres copies suivent l’option choisie dans l’interface : déplacement vers `_doublons`, suppression, ou conservation de toutes les copies.
 
 ## Prérequis
 
@@ -56,6 +104,7 @@ python -m pycture
 pycture/
 ├── main.py
 ├── requirements.txt
+├── LICENSE
 ├── pycture/
 │   ├── gui.py          # Interface graphique
 │   ├── organizer.py    # Organisation, renommage, plan d'actions
@@ -68,4 +117,18 @@ pycture/
 
 ## Licence
 
-Usage personnel / projet libre — adaptez selon vos besoins.
+Distribué sous **GNU GPLv3** — voir le fichier [`LICENSE`](./LICENSE).
+
+---
+
+## Soutenir le projet
+
+Si le projet vous est utile, vous pouvez soutenir le travail :  
+[![Buy Me A Coffee](https://cdn.buymeacoffee.com/buttons/v2/default-blue.png)](https://www.buymeacoffee.com/marcyves)
+
+---
+
+## Contact
+
+- LinkedIn : [Marc Augier](https://linkedin.com/in/marcaugier)
+- GitHub : [marcyves](https://github.com/marcyves)
