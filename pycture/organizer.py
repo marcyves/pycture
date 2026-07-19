@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -54,32 +55,98 @@ class PlannedMove:
 
 
 @dataclass
+class MediaStats:
+    """Inventaire et compteurs pour la zone résumé GUI."""
+
+    photos_by_ext: dict[str, int] = field(default_factory=dict)
+    videos_by_ext: dict[str, int] = field(default_factory=dict)
+    photo_total: int = 0
+    video_total: int = 0
+    duplicate_groups: int = 0
+    duplicate_extras: int = 0
+    already_correct: int = 0
+    to_organize: int = 0
+    sans_exif: int = 0
+    videos_to_move: int = 0
+    junk: int = 0
+    sync_dates: int = 0
+    errors: int = 0
+    analyzed: bool = False
+
+    @property
+    def media_total(self) -> int:
+        return self.photo_total + self.video_total
+
+    def format_ext_counts(self, by_ext: dict[str, int]) -> str:
+        if not by_ext:
+            return "—"
+        parts = [f"{ext} {n}" for ext, n in sorted(by_ext.items(), key=lambda x: (-x[1], x[0]))]
+        return ", ".join(parts)
+
+
+def scan_inventory(root: Path, include_videos: bool = True) -> MediaStats:
+    """Comptage rapide photos/vidéos par extension (sans doublons)."""
+    stats = MediaStats()
+    photos: Counter[str] = Counter()
+    videos: Counter[str] = Counter()
+    if not root.is_dir():
+        return stats
+    for p in root.rglob("*"):
+        if is_image(p):
+            photos[p.suffix.lower() or "."] += 1
+        elif include_videos and is_video(p):
+            videos[p.suffix.lower() or "."] += 1
+    stats.photos_by_ext = dict(photos)
+    stats.videos_by_ext = dict(videos)
+    stats.photo_total = sum(photos.values())
+    stats.video_total = sum(videos.values())
+    return stats
+
+
+@dataclass
 class OrganizerPlan:
     moves: list[PlannedMove] = field(default_factory=list)
     duplicate_groups: list[DuplicateGroup] = field(default_factory=list)
     skipped: list[tuple[Path, str]] = field(default_factory=list)
     errors: list[tuple[Path, str]] = field(default_factory=list)
     junk_files: list[Path] = field(default_factory=list)
+    stats: MediaStats = field(default_factory=MediaStats)
 
     @property
     def summary(self) -> str:
-        n_dupes = sum(len(g.duplicates) for g in self.duplicate_groups)
-        n_photos = sum(1 for m in self.moves if m.reason == "organisation")
-        n_videos = sum(1 for m in self.moves if m.reason == "video")
-        n_sans = sum(1 for m in self.moves if m.reason == "sans_exif")
-        n_sync = sum(1 for m in self.moves if m.reason == "sync_dates")
-        n_dup_actions = sum(1 for m in self.moves if m.reason in ("doublon", "suppression"))
+        s = self.stats
         lines = [
-            f"Photos à déplacer / renommer : {n_photos}",
-            f"Sans EXIF (→ année/_sans_exif) : {n_sans}",
-            f"Vidéos → année/video : {n_videos}",
-            f"Dates fichier à aligner sur EXIF : {n_sync}",
-            f"Actions doublons : {n_dup_actions} ({len(self.duplicate_groups)} groupes, {n_dupes} en trop)",
-            f"Fichiers parasites (._* / système) : {len(self.junk_files)}",
-            f"Ignorés : {len(self.skipped)}",
-            f"Erreurs : {len(self.errors)}",
+            f"Photos : {s.photo_total} ({s.format_ext_counts(s.photos_by_ext)})",
+            f"Vidéos : {s.video_total} ({s.format_ext_counts(s.videos_by_ext)})",
+            f"Total médias : {s.media_total}",
+            f"Doublons : {s.duplicate_groups} groupes ({s.duplicate_extras} fichiers en trop)",
+            f"Déjà corrects : {s.already_correct}",
+            f"À organiser : {s.to_organize}",
+            f"Sans EXIF : {s.sans_exif}",
+            f"Vidéos à déplacer : {s.videos_to_move}",
+            f"Dates à aligner : {s.sync_dates}",
+            f"Parasites : {s.junk}",
+            f"Erreurs : {s.errors}",
         ]
         return "\n".join(lines)
+
+    def refresh_stats(self, inventory: MediaStats | None = None) -> None:
+        """Met à jour les compteurs du plan à partir de l'inventaire + actions."""
+        if inventory is not None:
+            self.stats.photos_by_ext = inventory.photos_by_ext
+            self.stats.videos_by_ext = inventory.videos_by_ext
+            self.stats.photo_total = inventory.photo_total
+            self.stats.video_total = inventory.video_total
+        self.stats.duplicate_groups = len(self.duplicate_groups)
+        self.stats.duplicate_extras = sum(len(g.duplicates) for g in self.duplicate_groups)
+        self.stats.already_correct = len(self.skipped)
+        self.stats.to_organize = sum(1 for m in self.moves if m.reason == "organisation")
+        self.stats.sans_exif = sum(1 for m in self.moves if m.reason == "sans_exif")
+        self.stats.videos_to_move = sum(1 for m in self.moves if m.reason == "video")
+        self.stats.junk = len(self.junk_files)
+        self.stats.sync_dates = sum(1 for m in self.moves if m.reason == "sync_dates")
+        self.stats.errors = len(self.errors)
+        self.stats.analyzed = True
 
 
 def collect_images(root: Path) -> list[Path]:
@@ -194,6 +261,7 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
 
     base = organization_base(source, options.output_dir)
     year_hint = _source_year_hint(source)
+    inventory = scan_inventory(source, include_videos=options.include_videos)
     media = collect_media(source, include_videos=options.include_videos)
 
     if progress_cb:
@@ -374,6 +442,7 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
                 PlannedMove(source=j, destination=Path(), reason="junk")
             )
 
+    plan.refresh_stats(inventory)
     return plan
 
 

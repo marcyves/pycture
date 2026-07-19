@@ -10,12 +10,14 @@ from tkinter import filedialog, messagebox, ttk
 from .organizer import (
     DuplicateAction,
     FolderStructure,
+    MediaStats,
     OrganizerOptions,
     OrganizerPlan,
     build_plan,
     collect_media,
     execute_plan,
     remove_empty_dirs,
+    scan_inventory,
 )
 from .settings import (
     get_last_output_dir,
@@ -29,8 +31,8 @@ class PyctureApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Pycture — Organisation de photos")
-        self.minsize(960, 680)
-        self.geometry("1100x760")
+        self.minsize(1000, 720)
+        self.geometry("1180x820")
 
         self._plan: OrganizerPlan | None = None
         self._busy = False
@@ -48,49 +50,55 @@ class PyctureApp(tk.Tk):
         main = ttk.Frame(self, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
 
-        # Dossier source
-        src_frame = ttk.LabelFrame(main, text="Dossier de travail", padding=10)
-        src_frame.pack(fill=tk.X, **pad)
+        # Chemins : source + destination sur la même ligne
+        paths = ttk.LabelFrame(main, text="Chemins", padding=10)
+        paths.pack(fill=tk.X, **pad)
+        paths.columnconfigure(1, weight=1)
+        paths.columnconfigure(4, weight=1)
 
         self.source_var = tk.StringVar()
-        ttk.Entry(src_frame, textvariable=self.source_var).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8)
-        )
-        ttk.Button(src_frame, text="Parcourir…", command=self._browse_source).pack(
-            side=tk.LEFT
-        )
-
-        # Dossier de sortie (optionnel)
-        out_frame = ttk.LabelFrame(
-            main,
-            text="Dossier de destination (vide = réorganiser sur place)",
-            padding=10,
-        )
-        out_frame.pack(fill=tk.X, **pad)
-
         self.output_var = tk.StringVar()
-        ttk.Entry(out_frame, textvariable=self.output_var).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8)
+
+        ttk.Label(paths, text="Source :").grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(paths, textvariable=self.source_var).grid(
+            row=0, column=1, sticky=tk.EW, padx=(6, 4)
         )
-        ttk.Button(out_frame, text="Parcourir…", command=self._browse_output).pack(
-            side=tk.LEFT
+        ttk.Button(paths, text="Parcourir…", command=self._browse_source).grid(
+            row=0, column=2, padx=(0, 16)
         )
 
-        # Options
+        ttk.Label(paths, text="Destination :").grid(row=0, column=3, sticky=tk.W)
+        ttk.Entry(paths, textvariable=self.output_var).grid(
+            row=0, column=4, sticky=tk.EW, padx=(6, 4)
+        )
+        ttk.Button(paths, text="Parcourir…", command=self._browse_output).grid(
+            row=0, column=5
+        )
+        ttk.Label(
+            paths,
+            text="Destination vide = réorganiser sur place",
+            foreground="#666",
+        ).grid(row=1, column=3, columnspan=3, sticky=tk.W, pady=(4, 0))
+
+        # Options sur 2 colonnes
         opts = ttk.LabelFrame(main, text="Options", padding=10)
         opts.pack(fill=tk.X, **pad)
+        left = ttk.Frame(opts)
+        right = ttk.Frame(opts)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        ttk.Label(opts, text="Structure des dossiers :").grid(
-            row=0, column=0, sticky=tk.W, pady=4
+        ttk.Label(left, text="Structure des dossiers :").grid(
+            row=0, column=0, sticky=tk.W, pady=3
         )
         self.structure_var = tk.StringVar()
         structure_combo = ttk.Combobox(
-            opts,
+            left,
             textvariable=self.structure_var,
             state="readonly",
-            width=36,
+            width=28,
         )
-        structure_combo.grid(row=0, column=1, sticky=tk.W, pady=4, padx=8)
+        structure_combo.grid(row=0, column=1, sticky=tk.W, pady=3, padx=6)
         structure_combo.bind("<<ComboboxSelected>>", lambda _e: self._sync_event_state())
 
         self._structure_labels = {
@@ -102,30 +110,14 @@ class PyctureApp(tk.Tk):
         self.structure_var.set(self._structure_labels[FolderStructure.YEAR_MONTH_DAY.value])
         self._label_to_structure = {v: k for k, v in self._structure_labels.items()}
 
-        ttk.Label(opts, text="Nom de l'événement :").grid(
-            row=1, column=0, sticky=tk.W, pady=4
+        ttk.Label(left, text="Nom de l'événement :").grid(
+            row=1, column=0, sticky=tk.W, pady=3
         )
         self.event_var = tk.StringVar()
-        self.event_entry = ttk.Entry(opts, textvariable=self.event_var, width=38)
-        self.event_entry.grid(row=1, column=1, sticky=tk.W, pady=4, padx=8)
+        self.event_entry = ttk.Entry(left, textvariable=self.event_var, width=30)
+        self.event_entry.grid(row=1, column=1, sticky=tk.W, pady=3, padx=6)
 
-        self.rename_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            opts,
-            text="Renommer avec la date/heure (aaaa-mm-jj hh-mm-ss)",
-            variable=self.rename_var,
-        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=4)
-
-        self.videos_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            opts,
-            text="Inclure les vidéos (AVI, MP4, …) → dossier année/video",
-            variable=self.videos_var,
-        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=4)
-
-        ttk.Label(opts, text="Doublons (contenu identique) :").grid(
-            row=4, column=0, sticky=tk.W, pady=4
-        )
+        ttk.Label(left, text="Doublons :").grid(row=2, column=0, sticky=tk.W, pady=3)
         self.dup_var = tk.StringVar(value="Déplacer vers _doublons")
         self._dup_labels = {
             DuplicateAction.MOVE_TO_DOUBLONS.value: "Déplacer vers _doublons",
@@ -134,35 +126,63 @@ class PyctureApp(tk.Tk):
         }
         self._label_to_dup = {v: k for k, v in self._dup_labels.items()}
         ttk.Combobox(
-            opts,
+            left,
             textvariable=self.dup_var,
             state="readonly",
-            width=36,
+            width=28,
             values=list(self._dup_labels.values()),
-        ).grid(row=4, column=1, sticky=tk.W, pady=4, padx=8)
+        ).grid(row=2, column=1, sticky=tk.W, pady=3, padx=6)
+
+        self.rename_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            right,
+            text="Renommer avec la date/heure (aaaa-mm-jj hh-mm-ss)",
+            variable=self.rename_var,
+        ).grid(row=0, column=0, sticky=tk.W, pady=2)
+
+        self.videos_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            right,
+            text="Inclure les vidéos → année/video",
+            variable=self.videos_var,
+        ).grid(row=1, column=0, sticky=tk.W, pady=2)
 
         self.clean_empty_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            opts,
+            right,
             text="Supprimer les dossiers vides après organisation",
             variable=self.clean_empty_var,
-        ).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=4)
+        ).grid(row=2, column=0, sticky=tk.W, pady=2)
 
         self.clean_junk_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            opts,
-            text="Supprimer les fichiers parasites macOS (._* , .DS_Store, …)",
+            right,
+            text="Supprimer les parasites macOS (._* , .DS_Store)",
             variable=self.clean_junk_var,
-        ).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=4)
+        ).grid(row=3, column=0, sticky=tk.W, pady=2)
 
         self.sync_dates_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            opts,
-            text="Aligner les dates du fichier (création/modif.) sur l'EXIF",
+            right,
+            text="Aligner les dates fichier sur l'EXIF (si fiable)",
             variable=self.sync_dates_var,
-        ).grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=4)
+        ).grid(row=4, column=0, sticky=tk.W, pady=2)
 
-        opts.columnconfigure(1, weight=1)
+        # Résumé
+        summary = ttk.LabelFrame(main, text="Résumé", padding=10)
+        summary.pack(fill=tk.X, **pad)
+        self.summary_text = tk.Text(
+            summary,
+            height=8,
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Menlo", 11) if self._has_font("Menlo") else ("Courier", 11),
+        )
+        self.summary_text.pack(fill=tk.X)
+        self._set_summary_idle()
 
         # Actions
         actions = ttk.Frame(main)
@@ -234,6 +254,66 @@ class PyctureApp(tk.Tk):
             fill=tk.X, pady=(6, 0)
         )
 
+    def _has_font(self, family: str) -> bool:
+        try:
+            from tkinter import font as tkfont
+
+            return family in tkfont.families()
+        except Exception:
+            return False
+
+    def _set_summary_text(self, text: str) -> None:
+        self.summary_text.configure(state=tk.NORMAL)
+        self.summary_text.delete("1.0", tk.END)
+        self.summary_text.insert("1.0", text)
+        self.summary_text.configure(state=tk.DISABLED)
+
+    def _set_summary_idle(self) -> None:
+        self._set_summary_text(
+            "Choisissez un dossier source pour l'inventaire,\n"
+            "puis Analysez pour les doublons et l'état d'organisation."
+        )
+
+    def _format_inventory_summary(self, stats: MediaStats, *, analyzed: bool = False) -> str:
+        lines = [
+            f"Photos : {stats.photo_total:>5}   ({stats.format_ext_counts(stats.photos_by_ext)})",
+            f"Vidéos : {stats.video_total:>5}   ({stats.format_ext_counts(stats.videos_by_ext)})",
+            f"Total  : {stats.media_total:>5}",
+        ]
+        if analyzed:
+            lines += [
+                "",
+                f"Doublons        : {stats.duplicate_groups} groupes "
+                f"({stats.duplicate_extras} fichiers en trop)",
+                f"Déjà corrects   : {stats.already_correct}",
+                f"À organiser     : {stats.to_organize}",
+                f"Sans EXIF       : {stats.sans_exif}",
+                f"Vidéos à bouger : {stats.videos_to_move}",
+                f"Dates à aligner : {stats.sync_dates}",
+                f"Parasites       : {stats.junk}",
+                f"Erreurs         : {stats.errors}",
+            ]
+        else:
+            lines += ["", "Analyse non lancée — doublons et « déjà corrects » indisponibles."]
+        return "\n".join(lines)
+
+    def _refresh_inventory_async(self, root: Path) -> None:
+        include_videos = self.videos_var.get()
+        self._set_summary_text("Inventaire en cours…")
+
+        def worker() -> None:
+            try:
+                stats = scan_inventory(root, include_videos=include_videos)
+                text = self._format_inventory_summary(stats, analyzed=False)
+            except Exception as exc:
+                text = f"Erreur inventaire : {exc}"
+            self.after(0, lambda: self._set_summary_text(text))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_summary_from_plan(self, plan: OrganizerPlan) -> None:
+        self._set_summary_text(self._format_inventory_summary(plan.stats, analyzed=True))
+
     # ── Helpers UI ───────────────────────────────────────────────────
 
     def _on_thumb_canvas_configure(self, event) -> None:
@@ -256,6 +336,7 @@ class PyctureApp(tk.Tk):
         if source and Path(source).is_dir():
             self.source_var.set(source)
             self._load_folder_thumbnails(Path(source))
+            self._refresh_inventory_async(Path(source))
         output = get_last_output_dir()
         if output and Path(output).is_dir():
             self.output_var.set(output)
@@ -270,6 +351,7 @@ class PyctureApp(tk.Tk):
             self.source_var.set(path)
             remember_paths(source_dir=path)
             self._load_folder_thumbnails(Path(path))
+            self._refresh_inventory_async(Path(path))
 
     def _browse_output(self) -> None:
         initial = self.output_var.get().strip() or self.source_var.get().strip() or None
@@ -544,6 +626,7 @@ class PyctureApp(tk.Tk):
 
     def _on_preview_done(self, plan: OrganizerPlan, options: OrganizerOptions) -> None:
         self._plan = plan
+        self._update_summary_from_plan(plan)
         self._clear_log()
         self._append_log("=== Aperçu (aucune modification) ===\n")
         self._append_log(plan.summary)
