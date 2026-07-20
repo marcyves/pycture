@@ -249,11 +249,6 @@ class PyctureApp(tk.Tk):
             chk_frame, text="Aligner dates fichier sur EXIF", variable=self.sync_dates_var
         ).grid(row=2, column=0, sticky=tk.W, pady=2, padx=(0, 10))
 
-        self.move_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            chk_frame, text="Déplacer au lieu de copier (fusion)", variable=self.move_var
-        ).grid(row=2, column=1, sticky=tk.W, pady=2)
-
         # Résumé d'inventaire
         summary = ttk.LabelFrame(right_panel, text=" Résumé de l'analyse ", padding=10)
         summary.pack(fill=tk.BOTH, expand=True)
@@ -307,6 +302,12 @@ class PyctureApp(tk.Tk):
             style="Accent.TButton",
         )
         self.merge_apply_btn.pack(side=tk.LEFT, padx=4, pady=2)
+        self.move_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            merge_group,
+            text="Déplacer au lieu de copier",
+            variable=self.move_var,
+        ).pack(side=tk.LEFT, padx=(12, 4), pady=2)
 
         # Bouton utilitaire à droite
         self.clear_cache_btn = ttk.Button(
@@ -1281,6 +1282,9 @@ class PyctureApp(tk.Tk):
 
         self._set_busy(True)
         plan = self._merge_plan
+        clean_empty = self.clean_empty_var.get()
+        source_root = self.source_var.get().strip()
+        dest_root = self.output_var.get().strip()
         self._start_job(
             "Application de la fusion",
             [("", "Copie / déplacement des fichiers")],
@@ -1293,13 +1297,24 @@ class PyctureApp(tk.Tk):
                     dry_run=False,
                     progress_cb=self._progress_cb,
                 )
-                self.after(0, lambda: self._on_merge_apply_done(logs, plan))
+                removed: list[Path] = []
+                if clean_empty:
+                    # Source surtout en mode déplacer ; destination aussi par cohérence
+                    for root in (source_root, dest_root):
+                        if root and Path(root).is_dir():
+                            removed.extend(remove_empty_dirs(Path(root), dry_run=False))
+                self.after(0, lambda: self._on_merge_apply_done(logs, plan, removed))
             except Exception as exc:
                 self.after(0, lambda e=exc: self._on_error(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_merge_apply_done(self, logs: list[str], plan: MergePlan) -> None:
+    def _on_merge_apply_done(
+        self,
+        logs: list[str],
+        plan: MergePlan,
+        removed: list[Path] | None = None,
+    ) -> None:
         for line in logs:
             self._append_log(line)
 
@@ -1309,6 +1324,12 @@ class PyctureApp(tk.Tk):
         self._append_log(f"  dont renommages conflit : {len(plan.renames)}")
         self._append_log(f"Ignorés (doublon contenu) : {len(plan.skipped)}")
         self._append_log(f"Erreurs : {errors}")
+        if removed:
+            self._append_log(f"\nDossiers vides supprimés : {len(removed)}")
+            for d in removed[:50]:
+                self._append_log(f"  {d}")
+            if len(removed) > 50:
+                self._append_log(f"  … et {len(removed) - 50} autres")
         self._append_log("\nTerminé.")
 
         dest = self.output_var.get().strip()
