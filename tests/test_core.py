@@ -154,6 +154,53 @@ def test_photos_library_export_minimal() -> None:
         result = export_photos_library(lib, dest, include_videos=False)
         assert len(result.copied) == 1
         assert result.copied[0].stem == "Vacances"
+        assert result.kind == "photos"
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_aperture_library_export_minimal() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_aplib_")).resolve()
+    try:
+        lib = tmp / "MonAperture.aplibrary"
+        masters = lib / "Masters" / "2010" / "05" / "12" / "20100512-123456"
+        masters.mkdir(parents=True)
+        (lib / "Database").mkdir()
+        Image.new("RGB", (6, 6), (3, 4, 5)).save(masters / "IMG_0001.JPG")
+
+        from pycture.photoslibrary import is_aperture_library, is_apple_media_library
+
+        assert is_aperture_library(lib)
+        assert is_apple_media_library(lib)
+        dest = tmp / "export"
+        result = export_photos_library(lib, dest, include_videos=False)
+        assert result.kind == "aperture"
+        assert len(result.copied) == 1
+        assert result.copied[0].name == "IMG_0001.JPG"
+        assert (dest / "IMG_0001.JPG").is_file()
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_photolibrary_export_minimal() -> None:
+    """Bibliothèque iPhoto / Aperture en .photolibrary (Masters/)."""
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_photolib_")).resolve()
+    try:
+        lib = tmp / "iPhoto Library.photolibrary"
+        masters = lib / "Masters" / "2008" / "01" / "15" / "20080115-000001"
+        masters.mkdir(parents=True)
+        (lib / "Database").mkdir()
+        Image.new("RGB", (5, 5), (7, 8, 9)).save(masters / "DSC_1234.jpg")
+
+        from pycture.photoslibrary import is_photolibrary, is_apple_media_library
+
+        assert is_photolibrary(lib)
+        assert is_apple_media_library(lib)
+        dest = tmp / "export"
+        result = export_photos_library(lib, dest, include_videos=False)
+        assert result.kind == "photolibrary"
+        assert len(result.copied) == 1
+        assert result.copied[0].name == "DSC_1234.jpg"
     finally:
         shutil.rmtree(tmp)
 
@@ -265,7 +312,6 @@ def test_merge_two_identical_sources_only_one_copied() -> None:
         assert len(copied) == 1
     finally:
         shutil.rmtree(tmp)
-
 
 
 def test_merge_source_nested_inside_destination() -> None:
