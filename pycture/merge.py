@@ -80,13 +80,25 @@ def _index_destination_digests(
     include_videos: bool,
     progress_cb=None,
     cache=None,
+    exclude_under: Path | None = None,
 ) -> dict[str, Path]:
-    """SHA-256 → chemin pour tous les médias déjà présents sous Destination."""
+    """SHA-256 → chemin pour tous les médias déjà présents sous Destination.
+
+    Si ``exclude_under`` est fourni (ex. Source imbriquée dans Destination),
+    ces fichiers ne sont pas indexés : ce sont les sources à fusionner, pas
+    du contenu « déjà en place ».
+    """
     digests: dict[str, Path] = {}
     if not destination.is_dir():
         return digests
+    if progress_cb:
+        progress_cb(0, 1, "Empreinte dest : scan du dossier…")
     media = collect_media(destination, include_videos=include_videos)
+    if exclude_under is not None:
+        media = [p for p in media if not _is_under(p, exclude_under)]
     total = len(media) or 1
+    if progress_cb:
+        progress_cb(0, total, f"Empreinte dest : {len(media)} fichier(s) à empreindre")
     for i, path in enumerate(media):
         if progress_cb:
             progress_cb(i + 1, total, f"Empreinte dest : {path.name}")
@@ -113,6 +125,9 @@ def build_merge_plan(options: MergeOptions, progress_cb=None) -> MergePlan:
         plan.errors.append((source, "Source et destination sont le même dossier"))
         return plan
 
+    source_inside_dest = _is_under(source, destination)
+    dest_inside_source = _is_under(destination, source)
+
     src_cache = FolderCache.open(source)
     dst_cache = FolderCache.open(destination)
     try:
@@ -121,13 +136,21 @@ def build_merge_plan(options: MergeOptions, progress_cb=None) -> MergePlan:
             include_videos=options.include_videos,
             progress_cb=progress_cb,
             cache=dst_cache,
+            # Source sous Destination : ne pas traiter les fichiers source
+            # comme déjà présents (sinon tout est skip_duplicate).
+            exclude_under=source if source_inside_dest else None,
         )
         reserved_dests: set[str] = set()
 
+        if progress_cb:
+            progress_cb(0, 1, "Analyse fusion : scan du dossier source…")
         media = collect_media(source, include_videos=options.include_videos)
-        # Ne pas re-traiter des fichiers déjà sous Destination (source englobante)
-        media = [p for p in media if not _is_under(p, destination)]
+        # Destination sous Source : ne pas re-traiter le contenu déjà en dest.
+        if dest_inside_source:
+            media = [p for p in media if not _is_under(p, destination)]
         total = len(media) or 1
+        if progress_cb:
+            progress_cb(0, total, f"Analyse fusion : {len(media)} fichier(s) à analyser")
 
         for i, path in enumerate(media):
             if progress_cb:

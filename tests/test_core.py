@@ -267,6 +267,31 @@ def test_merge_two_identical_sources_only_one_copied() -> None:
         shutil.rmtree(tmp)
 
 
+
+def test_merge_source_nested_inside_destination() -> None:
+    """Source sous Destination (ex. inbox → bibliothèque) ne doit pas tout skip."""
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_merge_nested_")).resolve()
+    try:
+        dst = tmp / "library"
+        src = dst / "inbox"
+        src.mkdir(parents=True)
+        Image.new("RGB", (6, 6), (3, 4, 5)).save(src / "new.jpg")
+        Image.new("RGB", (6, 6), (8, 8, 8)).save(dst / "old.jpg")
+
+        plan = build_merge_plan(
+            MergeOptions(source_dir=src, destination_dir=dst, move=False)
+        )
+        assert len(plan.to_merge) == 1
+        assert plan.to_merge[0].destination == dst / "new.jpg"
+        assert plan.skipped == []
+
+        execute_merge_plan(plan, dry_run=False)
+        assert (dst / "new.jpg").is_file()
+        assert (src / "new.jpg").is_file()  # copie
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_folder_cache_digest_hit_and_invalidate() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="pycture_cache_")).resolve()
     try:
