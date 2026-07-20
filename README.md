@@ -26,7 +26,7 @@ Application GUI Python pour nettoyer et organiser un dossier de photos (et ses s
 - Mémorisation du dernier dossier utilisé (`~/.pycture/settings.json`)
 - **Fusion de dossiers** : copie (ou déplacement) Source → Destination en préservant l’arborescence, sans doublons ni écrasement
 - **Cache local** (`.pycture/cache.sqlite`) : empreintes SHA-256 et dates EXIF pour accélérer les analyses suivantes
-- **Import photothèque Apple** (`.photoslibrary`) : copie les originaux vers un dossier, puis organisation Pycture
+- **Import photothèque Apple** (`.photoslibrary` / `.aplibrary` / `.photolibrary`) : copie les originaux vers un dossier, puis organisation Pycture
 
 ## Stratégie de datation
 
@@ -99,7 +99,7 @@ python -m pycture
 
 1. Choisir le **dossier de travail** (et éventuellement une destination)
 2. Régler la structure, le renommage, le traitement des doublons
-3. Cliquer sur **Analyser (aperçu)** et vérifier le journal / les miniatures
+3. Cliquer sur **Analyser** et vérifier le journal / les miniatures
 4. Cliquer sur **Appliquer** pour exécuter les actions
 
 ### Fusion de dossiers
@@ -108,7 +108,7 @@ Fusionne le dossier **Source** dans **Destination** en respectant les chemins re
 
 1. Renseigner **Source** et **Destination** (obligatoire)
 2. Optionnellement cocher **Déplacer au lieu de copier (fusion)** (sinon : copie, source intacte)
-3. Cliquer sur **Fusionner…** pour l’aperçu, puis **Appliquer**
+3. Cliquer sur **Analyser fusion** pour l’aperçu, puis **Fusionner**
 
 Règles de conflit :
 
@@ -127,24 +127,28 @@ Les vidéos suivent l’option « Inclure les vidéos ».
 
 Bouton **Vider le cache…** : efface le cache du dossier source (et de la destination si renseignée). Utile après une sync douteuse. Le journal d’analyse affiche `Cache : N hits / M miss`.
 
-### Import depuis Photos (Apple)
+### Import depuis Photos / Aperture (Apple)
 
-Pycture peut **exporter** les originaux d’une photothèque macOS (paquet `.photoslibrary`) vers un dossier de votre choix, puis les organiser comme n’importe quel autre dossier source.
+Pycture peut **copier** les originaux d’une photothèque macOS vers un dossier de votre choix, puis les organiser comme n’importe quel autre dossier source :
+
+- **Photos** : paquet `Nom.photoslibrary` (dossier `originals/`)
+- **Aperture** : paquet `Nom.aplibrary` (dossier `Masters/`)
+- **iPhoto / Aperture** : paquet `Nom.photolibrary` (dossier `Masters/`)
 
 **Important :** la photothèque n’est jamais modifiée — uniquement des copies.
 
 1. Renseigner le champ **Destination** (obligatoire pour cet import)
-2. Cliquer sur **Photothèque Apple…**
-3. Sélectionner un paquet `Nom.photoslibrary` (souvent dans `~/Pictures`)
-4. Pycture parcourt `originals/`, lit éventuellement `Photos.sqlite` pour retrouver les noms d’origine, et **copie** les fichiers vers la destination
+2. Cliquer sur **Importer une Photothèque Apple…**
+3. Sélectionner un paquet `.photoslibrary`, `.aplibrary` ou `.photolibrary` (souvent dans `~/Pictures`)
+4. Pycture copie les originaux / masters vers la destination
 5. Le dossier source Pycture est basculé sur cette destination → **Analyser** puis **Appliquer**
 
 Notes :
 
-- Les médias uniquement dans iCloud (non téléchargés sur le Mac) sont ignorés et listés comme absents.
-- Accordez à Terminal / Python un accès disque complet (Réglages → Confidentialité et sécurité) si macOS bloque la lecture de la photothèque.
+- **Photos** : les médias uniquement dans iCloud (non téléchargés) sont ignorés ; les noms d’origine viennent de `Photos.sqlite` si possible.
+- **Aperture** : seuls les masters **gérés** (dans `Masters/`) sont exportés. Les fichiers « référencés » (hors bibliothèque) ne sont pas copiés — consolidez-les ou exportez-les depuis Aperture.
+- Accordez à Terminal / Python un accès disque complet si macOS bloque la lecture.
 - Les vidéos suivent l’option « Inclure les vidéos ».
-- Sur place (sans destination) reste possible pour un dossier photos classique ; la photothèque Apple exige toujours une destination.
 
 ## Tests
 
@@ -177,7 +181,7 @@ pycture/
 │   ├── organizer.py     # Organisation, renommage, plan d'actions
 │   ├── duplicates.py    # Détection des doublons
 │   ├── exif_utils.py    # Date EXIF + filtres fichiers
-│   ├── photoslibrary.py # Export depuis .photoslibrary Apple
+│   ├── photoslibrary.py # Export Photos / Aperture / iPhoto
 │   ├── merge.py         # Fusion de dossiers sans doublons
 │   ├── folder_cache.py  # Cache SQLite local (.pycture/)
 │   ├── thumbnails.py    # Miniatures
