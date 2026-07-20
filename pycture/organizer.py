@@ -237,18 +237,37 @@ def _target_folder(
     return base / year / event
 
 
-def _unique_destination(dest: Path) -> Path:
-    """Évite d'écraser un fichier existant en ajoutant _1, _2, …"""
-    if not dest.exists():
+def unique_destination(dest: Path, reserved: set[str] | None = None) -> Path:
+    """Évite d'écraser un fichier existant en ajoutant _1, _2, …
+
+    ``reserved`` : clés ``str(path).casefold()`` (ou resolve) déjà prévues
+    dans un plan, même si le fichier n'existe pas encore sur le disque.
+    """
+    reserved = reserved or set()
+
+    def _taken(path: Path) -> bool:
+        if path.exists():
+            return True
+        try:
+            key = str(path.resolve()).casefold()
+        except OSError:
+            key = str(path).casefold()
+        return key in reserved or str(path).casefold() in reserved
+
+    if not _taken(dest):
         return dest
     stem, suffix = dest.stem, dest.suffix
     parent = dest.parent
     n = 1
     while True:
         candidate = parent / f"{stem}_{n}{suffix}"
-        if not candidate.exists():
+        if not _taken(candidate):
             return candidate
         n += 1
+
+
+# Compatibilité interne
+_unique_destination = unique_destination
 
 
 def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:

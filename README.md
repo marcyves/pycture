@@ -24,6 +24,7 @@ Application GUI Python pour nettoyer et organiser un dossier de photos (et ses s
 - Nettoyage des dossiers vides
 - Aperçu avant application + miniatures
 - Mémorisation du dernier dossier utilisé (`~/.pycture/settings.json`)
+- **Fusion de dossiers** : copie (ou déplacement) Source → Destination en préservant l’arborescence, sans doublons ni écrasement
 - **Import photothèque Apple** (`.photoslibrary`) : copie les originaux vers un dossier, puis organisation Pycture
 
 ## Stratégie de datation
@@ -100,6 +101,21 @@ python -m pycture
 3. Cliquer sur **Analyser (aperçu)** et vérifier le journal / les miniatures
 4. Cliquer sur **Appliquer** pour exécuter les actions
 
+### Fusion de dossiers
+
+Fusionne le dossier **Source** dans **Destination** en respectant les chemins relatifs (`source/2005/08/a.jpg` → `dest/2005/08/a.jpg`).
+
+1. Renseigner **Source** et **Destination** (obligatoire)
+2. Optionnellement cocher **Déplacer au lieu de copier (fusion)** (sinon : copie, source intacte)
+3. Cliquer sur **Fusionner…** pour l’aperçu, puis **Appliquer**
+
+Règles de conflit :
+
+- **même contenu** (SHA-256) déjà présent sous la destination → le fichier est **ignoré** (pas de doublon) ;
+- **même nom, contenu différent** → renommage en `nom_1.ext`, `nom_2.ext` (jamais d’écrasement).
+
+Les vidéos suivent l’option « Inclure les vidéos ».
+
 ### Import depuis Photos (Apple)
 
 Pycture peut **exporter** les originaux d’une photothèque macOS (paquet `.photoslibrary`) vers un dossier de votre choix, puis les organiser comme n’importe quel autre dossier source.
@@ -121,7 +137,7 @@ Notes :
 
 ## Tests
 
-La suite `pytest` couvre le cœur métier (dates, doublons, organisation, inventaire, export photothèque minimal) :
+La suite `pytest` couvre le cœur métier (dates, doublons, organisation, fusion, inventaire, export photothèque minimal) :
 
 ```bash
 source .venv/bin/activate
@@ -151,6 +167,7 @@ pycture/
 │   ├── duplicates.py    # Détection des doublons
 │   ├── exif_utils.py    # Date EXIF + filtres fichiers
 │   ├── photoslibrary.py # Export depuis .photoslibrary Apple
+│   ├── merge.py         # Fusion de dossiers sans doublons
 │   ├── thumbnails.py    # Miniatures
 │   └── settings.py      # Préférences (dernier chemin)
 ├── tests/

@@ -14,6 +14,7 @@ from PIL.ExifTags import IFD
 
 from pycture.duplicates import find_duplicates
 from pycture.exif_utils import get_capture_info, parse_datetime_from_filename
+from pycture.merge import MergeOptions, build_merge_plan, execute_merge_plan
 from pycture.organizer import (
     DuplicateAction,
     FolderStructure,
@@ -151,5 +152,114 @@ def test_photos_library_export_minimal() -> None:
         result = export_photos_library(lib, dest, include_videos=False)
         assert len(result.copied) == 1
         assert result.copied[0].stem == "Vacances"
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_merge_skip_same_content() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_merge_skip_")).resolve()
+    try:
+        src = tmp / "src"
+        dst = tmp / "dst" / "2005" / "08"
+        src.mkdir()
+        dst.mkdir(parents=True)
+        Image.new("RGB", (8, 8), (1, 2, 3)).save(src / "a.jpg")
+        shutil.copy(src / "a.jpg", dst / "already.jpg")
+
+        plan = build_merge_plan(
+            MergeOptions(source_dir=src, destination_dir=tmp / "dst", move=False)
+        )
+        assert len(plan.skipped) == 1
+        assert plan.to_merge == []
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_merge_rename_same_name_different_content() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_merge_rename_")).resolve()
+    try:
+        src = tmp / "src"
+        dst_root = tmp / "dst"
+        sub = src / "2005" / "08"
+        sub.mkdir(parents=True)
+        (dst_root / "2005" / "08").mkdir(parents=True)
+        Image.new("RGB", (8, 8), (1, 1, 1)).save(sub / "photo.jpg")
+        Image.new("RGB", (8, 8), (9, 9, 9)).save(dst_root / "2005" / "08" / "photo.jpg")
+
+        plan = build_merge_plan(
+            MergeOptions(source_dir=src, destination_dir=dst_root, move=False)
+        )
+        assert len(plan.to_merge) == 1
+        assert plan.to_merge[0].reason == "rename_conflict"
+        assert plan.to_merge[0].destination.name == "photo_1.jpg"
+
+        execute_merge_plan(plan, dry_run=False)
+        assert (dst_root / "2005" / "08" / "photo.jpg").is_file()
+        assert (dst_root / "2005" / "08" / "photo_1.jpg").is_file()
+        assert (src / "2005" / "08" / "photo.jpg").is_file()  # copie : source intacte
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_merge_copy_preserves_relative_tree() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_merge_copy_")).resolve()
+    try:
+        src = tmp / "src"
+        dst = tmp / "dst"
+        (src / "2003" / "09").mkdir(parents=True)
+        dst.mkdir()
+        Image.new("RGB", (6, 6), (4, 5, 6)).save(src / "2003" / "09" / "x.jpg")
+
+        plan = build_merge_plan(
+            MergeOptions(source_dir=src, destination_dir=dst, move=False)
+        )
+        assert len(plan.to_merge) == 1
+        assert plan.to_merge[0].destination == dst / "2003" / "09" / "x.jpg"
+
+        execute_merge_plan(plan, dry_run=False)
+        assert (dst / "2003" / "09" / "x.jpg").is_file()
+        assert (src / "2003" / "09" / "x.jpg").is_file()
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_merge_move_removes_source() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_merge_move_")).resolve()
+    try:
+        src = tmp / "src"
+        dst = tmp / "dst"
+        src.mkdir()
+        dst.mkdir()
+        Image.new("RGB", (5, 5), (7, 7, 7)).save(src / "m.jpg")
+
+        plan = build_merge_plan(
+            MergeOptions(source_dir=src, destination_dir=dst, move=True)
+        )
+        execute_merge_plan(plan, dry_run=False)
+        assert (dst / "m.jpg").is_file()
+        assert not (src / "m.jpg").exists()
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_merge_two_identical_sources_only_one_copied() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_merge_dupsrc_")).resolve()
+    try:
+        src = tmp / "src"
+        dst = tmp / "dst"
+        (src / "a").mkdir(parents=True)
+        (src / "b").mkdir()
+        dst.mkdir()
+        Image.new("RGB", (4, 4), (2, 2, 2)).save(src / "a" / "one.jpg")
+        shutil.copy(src / "a" / "one.jpg", src / "b" / "two.jpg")
+
+        plan = build_merge_plan(
+            MergeOptions(source_dir=src, destination_dir=dst, move=False)
+        )
+        assert len(plan.to_merge) == 1
+        assert len(plan.skipped) == 1
+        execute_merge_plan(plan, dry_run=False)
+        copied = list(dst.rglob("*.jpg"))
+        assert len(copied) == 1
     finally:
         shutil.rmtree(tmp)

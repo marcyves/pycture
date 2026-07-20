@@ -7,6 +7,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from .merge import (
+    MergeOptions,
+    MergePlan,
+    PlannedMerge,
+    build_merge_plan,
+    execute_merge_plan,
+)
 from .organizer import (
     DuplicateAction,
     FolderStructure,
@@ -36,6 +43,7 @@ class PyctureApp(tk.Tk):
         self.geometry("1180x820")
 
         self._plan: OrganizerPlan | None = None
+        self._merge_plan: MergePlan | None = None
         self._busy = False
         self._thumb_photos: list = []  # garder les références PhotoImage
         self._thumb_load_id = 0
@@ -82,7 +90,7 @@ class PyctureApp(tk.Tk):
         ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
         ttk.Label(
             paths,
-            text="Destination : optionnelle (sur place) — obligatoire pour Photothèque Apple",
+            text="Destination : optionnelle (organisation) — obligatoire pour fusion / Photothèque",
             foreground="#666",
         ).grid(row=1, column=3, columnspan=3, sticky=tk.W, pady=(8, 0))
 
@@ -174,6 +182,13 @@ class PyctureApp(tk.Tk):
             variable=self.sync_dates_var,
         ).grid(row=4, column=0, sticky=tk.W, pady=2)
 
+        self.move_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            right,
+            text="Déplacer au lieu de copier (fusion)",
+            variable=self.move_var,
+        ).grid(row=5, column=0, sticky=tk.W, pady=2)
+
         # Résumé
         summary = ttk.LabelFrame(main, text="Résumé", padding=10)
         summary.pack(fill=tk.X, **pad)
@@ -198,6 +213,11 @@ class PyctureApp(tk.Tk):
             actions, text="Analyser (aperçu)", command=self._run_preview
         )
         self.preview_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.merge_btn = ttk.Button(
+            actions, text="Fusionner…", command=self._run_merge_preview
+        )
+        self.merge_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.apply_btn = ttk.Button(
             actions, text="Appliquer", command=self._run_apply, state=tk.DISABLED
@@ -515,8 +535,11 @@ class PyctureApp(tk.Tk):
         self._busy = busy
         state = tk.DISABLED if busy else tk.NORMAL
         self.preview_btn.configure(state=state)
+        self.merge_btn.configure(state=state)
         if busy:
             self.apply_btn.configure(state=tk.DISABLED)
+        elif self._merge_plan and self._merge_plan.to_merge:
+            self.apply_btn.configure(state=tk.NORMAL)
         elif self._plan and self._plan.moves:
             self.apply_btn.configure(state=tk.NORMAL)
         else:
@@ -572,6 +595,52 @@ class PyctureApp(tk.Tk):
             clean_junk=self.clean_junk_var.get(),
             include_videos=self.videos_var.get(),
             sync_file_dates=self.sync_dates_var.get(),
+        )
+
+    def _merge_options_from_ui(self) -> MergeOptions | None:
+        source = self.source_var.get().strip()
+        if not source:
+            messagebox.showwarning("Dossier manquant", "Choisissez un dossier source.")
+            return None
+        source_path = Path(source)
+        if not source_path.is_dir():
+            messagebox.showerror("Erreur", f"Dossier source introuvable :\n{source}")
+            return None
+
+        dest = self.output_var.get().strip()
+        if not dest:
+            messagebox.showwarning(
+                "Destination obligatoire",
+                "Pour fusionner, choisissez un dossier de destination.",
+            )
+            self._browse_output()
+            dest = self.output_var.get().strip()
+            if not dest:
+                return None
+
+        dest_path = Path(dest)
+        if not dest_path.is_dir():
+            messagebox.showerror(
+                "Destination invalide",
+                f"Dossier de destination introuvable :\n{dest}",
+            )
+            return None
+
+        try:
+            if source_path.resolve() == dest_path.resolve():
+                messagebox.showerror(
+                    "Chemins identiques",
+                    "Source et destination doivent être des dossiers différents.",
+                )
+                return None
+        except OSError:
+            pass
+
+        return MergeOptions(
+            source_dir=source_path,
+            destination_dir=dest_path,
+            move=self.move_var.get(),
+            include_videos=self.videos_var.get(),
         )
 
     def _remember_current_paths(self) -> None:
@@ -639,6 +708,30 @@ class PyctureApp(tk.Tk):
             self.after(0, lambda: self._populate_thumbnails(load_id, items, "Plan d'organisation"))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _load_merge_plan_thumbnails(self, plan: MergePlan) -> None:
+        """Miniatures basées sur le plan de fusion."""
+        self._thumb_load_id += 1
+        load_id = self._thumb_load_id
+        self._clear_thumbnails()
+
+        items: list[tuple[Path, str, str]] = []
+        for action in plan.actions:
+            if action.reason == "skip_duplicate":
+                caption = f"{action.source.name} (doublon)"
+                badge = "doublon"
+            elif action.reason == "rename_conflict":
+                caption = f"{action.source.name} → {action.destination.name}"
+                badge = "renommer"
+            else:
+                caption = f"{action.source.name} → {action.destination}"
+                badge = "déplacer" if plan.move else "copier"
+            items.append((action.source, caption, badge))
+
+        self.after(
+            0,
+            lambda: self._populate_thumbnails(load_id, items, "Plan de fusion"),
+        )
 
     def _populate_thumbnails(
         self,
@@ -715,7 +808,23 @@ class PyctureApp(tk.Tk):
         if badge:
             parts.append(f"Statut : {badge}")
         # Chercher le move correspondant dans le plan
-        if self._plan:
+        if self._merge_plan:
+            for action in self._merge_plan.actions:
+                try:
+                    same = action.source.resolve() == path.resolve()
+                except OSError:
+                    same = action.source == path
+                if not same:
+                    continue
+                if action.reason == "skip_duplicate":
+                    parts.append(f"Ignoré (doublon contenu) ≡ {action.destination}")
+                elif action.reason == "rename_conflict":
+                    parts.append(f"Renommer → {action.destination}")
+                else:
+                    verb = "Déplacer" if self._merge_plan.move else "Copier"
+                    parts.append(f"{verb} → {action.destination}")
+                break
+        elif self._plan:
             for move in self._plan.moves:
                 if move.source.resolve() == path.resolve():
                     if move.reason == "suppression":
@@ -745,6 +854,7 @@ class PyctureApp(tk.Tk):
         self._append_log("Analyse en cours…")
         self._set_busy(True)
         self._plan = None
+        self._merge_plan = None
 
         def worker() -> None:
             try:
@@ -832,8 +942,78 @@ class PyctureApp(tk.Tk):
         self.progress["value"] = 0
         self._set_busy(False)
 
+    def _run_merge_preview(self) -> None:
+        if self._busy:
+            return
+        options = self._merge_options_from_ui()
+        if not options:
+            return
+
+        self._remember_current_paths()
+        self._clear_log()
+        self._append_log("Analyse fusion en cours…")
+        self._set_busy(True)
+        self._plan = None
+        self._merge_plan = None
+
+        def worker() -> None:
+            try:
+                plan = build_merge_plan(options, progress_cb=self._progress_cb)
+                self.after(0, lambda: self._on_merge_preview_done(plan, options))
+            except Exception as exc:
+                self.after(0, lambda e=exc: self._on_error(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _format_merge_action_log(self, action: PlannedMerge, *, move: bool) -> str:
+        if action.reason == "skip_duplicate":
+            return f"IGNORER (doublon) {action.source} ≡ {action.destination}"
+        if action.reason == "rename_conflict":
+            return f"RENOMMER {action.source} → {action.destination}"
+        verb = "DÉPLACER" if move else "COPIER"
+        return f"{verb} {action.source} → {action.destination}"
+
+    def _on_merge_preview_done(self, plan: MergePlan, options: MergeOptions) -> None:
+        self._merge_plan = plan
+        self._plan = None
+        self._set_summary_text(plan.summary)
+        self._clear_log()
+        self._append_log("=== Aperçu fusion (aucune modification) ===\n")
+        self._append_log(plan.summary)
+        self._append_log("")
+        self._append_log(f"Source      : {options.source_dir}")
+        self._append_log(f"Destination : {options.destination_dir}")
+        self._append_log("")
+
+        self._append_log("--- Actions prévues ---")
+        for action in plan.actions[:200]:
+            self._append_log(self._format_merge_action_log(action, move=plan.move))
+        if len(plan.actions) > 200:
+            self._append_log(f"… et {len(plan.actions) - 200} autres actions")
+
+        if plan.errors:
+            self._append_log("\n--- Erreurs ---")
+            for path, err in plan.errors:
+                self._append_log(f"  {path} : {err}")
+
+        self._load_merge_plan_thumbnails(plan)
+
+        if plan.to_merge:
+            self.status_var.set(
+                "Aperçu fusion terminé. Vérifiez puis cliquez sur Appliquer."
+            )
+        else:
+            self.status_var.set("Aperçu fusion terminé — rien à fusionner.")
+        self.progress["value"] = 0
+        self._set_busy(False)
+
     def _run_apply(self) -> None:
-        if self._busy or not self._plan:
+        if self._busy:
+            return
+        if self._merge_plan is not None:
+            self._run_apply_merge()
+            return
+        if not self._plan:
             return
 
         n = len(self._plan.moves)
@@ -876,6 +1056,64 @@ class PyctureApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _run_apply_merge(self) -> None:
+        if self._busy or not self._merge_plan:
+            return
+
+        n = len(self._merge_plan.to_merge)
+        if n == 0:
+            messagebox.showinfo("Rien à faire", "Aucun fichier à fusionner.")
+            return
+
+        verb = "déplacés" if self._merge_plan.move else "copiés"
+        warning = (
+            f"{n} fichier(s) vont être {verb} vers la destination.\n"
+            f"Ignorés (doublon) : {len(self._merge_plan.skipped)}\n"
+            f"Renommages conflit : {len(self._merge_plan.renames)}\n\n"
+            "Continuer ?"
+        )
+        if not messagebox.askyesno("Confirmer la fusion", warning):
+            return
+
+        self._set_busy(True)
+        self._append_log("\n=== Application fusion ===\n")
+        plan = self._merge_plan
+
+        def worker() -> None:
+            try:
+                logs = execute_merge_plan(
+                    plan,
+                    dry_run=False,
+                    progress_cb=self._progress_cb,
+                )
+                self.after(0, lambda: self._on_merge_apply_done(logs, plan))
+            except Exception as exc:
+                self.after(0, lambda e=exc: self._on_error(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_merge_apply_done(self, logs: list[str], plan: MergePlan) -> None:
+        for line in logs:
+            self._append_log(line)
+
+        errors = sum(1 for line in logs if "ERREUR" in line)
+        self._append_log("\n--- Résumé fusion ---")
+        self._append_log(f"Fusionnés : {len(plan.to_merge)}")
+        self._append_log(f"  dont renommages conflit : {len(plan.renames)}")
+        self._append_log(f"Ignorés (doublon contenu) : {len(plan.skipped)}")
+        self._append_log(f"Erreurs : {errors}")
+        self._append_log("\nTerminé.")
+
+        dest = self.output_var.get().strip()
+        if dest and Path(dest).is_dir():
+            self._refresh_inventory_async(Path(dest))
+
+        self.status_var.set("Fusion terminée.")
+        self.progress["value"] = 0
+        self._merge_plan = None
+        self._set_busy(False)
+        messagebox.showinfo("Terminé", "La fusion des dossiers est terminée.")
+
     def _on_apply_done(self, logs: list[str], removed: list[Path]) -> None:
         for line in logs:
             self._append_log(line)
@@ -890,6 +1128,7 @@ class PyctureApp(tk.Tk):
         self.status_var.set("Organisation terminée.")
         self.progress["value"] = 0
         self._plan = None
+        self._merge_plan = None
         self._set_busy(False)
         messagebox.showinfo("Terminé", "L'organisation des photos est terminée.")
 
