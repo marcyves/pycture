@@ -7,6 +7,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from .folder_cache import clear_folder_cache
 from .merge import (
     MergeOptions,
     MergePlan,
@@ -224,6 +225,11 @@ class PyctureApp(tk.Tk):
         )
         self.apply_btn.pack(side=tk.LEFT)
 
+        self.clear_cache_btn = ttk.Button(
+            actions, text="Vider le cache…", command=self._clear_caches
+        )
+        self.clear_cache_btn.pack(side=tk.RIGHT)
+
         # Progression
         prog = ttk.Frame(main)
         prog.pack(fill=tk.X, **pad)
@@ -319,6 +325,10 @@ class PyctureApp(tk.Tk):
                 f"Parasites       : {stats.junk}",
                 f"Erreurs         : {stats.errors}",
             ]
+            if stats.cache_hits or stats.cache_misses:
+                lines.append(
+                    f"Cache           : {stats.cache_hits} hits / {stats.cache_misses} miss"
+                )
         else:
             lines += ["", "Analyse non lancée — doublons et « déjà corrects » indisponibles."]
         return "\n".join(lines)
@@ -388,6 +398,42 @@ class PyctureApp(tk.Tk):
         if path:
             self.output_var.set(path)
             remember_paths(output_dir=path)
+
+    def _clear_caches(self) -> None:
+        if self._busy:
+            return
+        roots: list[Path] = []
+        source = self.source_var.get().strip()
+        if source and Path(source).is_dir():
+            roots.append(Path(source))
+        dest = self.output_var.get().strip()
+        if dest and Path(dest).is_dir():
+            dest_path = Path(dest)
+            if not any(r.resolve() == dest_path.resolve() for r in roots):
+                roots.append(dest_path)
+        if not roots:
+            messagebox.showwarning(
+                "Aucun dossier",
+                "Indiquez un dossier source (et éventuellement une destination).",
+            )
+            return
+        labels = "\n".join(f"• {r}/.pycture/cache.sqlite" for r in roots)
+        if not messagebox.askyesno(
+            "Vider le cache",
+            f"Supprimer le cache Pycture de :\n\n{labels}\n\nContinuer ?",
+        ):
+            return
+        cleared = 0
+        for root in roots:
+            if clear_folder_cache(root):
+                cleared += 1
+        if cleared:
+            messagebox.showinfo(
+                "Cache vidé",
+                f"Cache effacé pour {cleared} dossier(s).",
+            )
+        else:
+            messagebox.showinfo("Cache", "Aucun fichier de cache trouvé.")
 
     def _import_photos_library(self) -> None:
         if self._busy:
@@ -536,6 +582,7 @@ class PyctureApp(tk.Tk):
         state = tk.DISABLED if busy else tk.NORMAL
         self.preview_btn.configure(state=state)
         self.merge_btn.configure(state=state)
+        self.clear_cache_btn.configure(state=state)
         if busy:
             self.apply_btn.configure(state=tk.DISABLED)
         elif self._merge_plan and self._merge_plan.to_merge:

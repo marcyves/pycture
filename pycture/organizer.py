@@ -18,6 +18,7 @@ from .exif_utils import (
     is_video,
     set_file_datetime,
 )
+from .folder_cache import FolderCache, is_under_pycture_meta
 
 
 class FolderStructure(str, Enum):
@@ -72,6 +73,8 @@ class MediaStats:
     sync_dates: int = 0
     errors: int = 0
     analyzed: bool = False
+    cache_hits: int = 0
+    cache_misses: int = 0
 
     @property
     def media_total(self) -> int:
@@ -92,6 +95,8 @@ def scan_inventory(root: Path, include_videos: bool = True) -> MediaStats:
     if not root.is_dir():
         return stats
     for p in root.rglob("*"):
+        if is_under_pycture_meta(p):
+            continue
         if is_image(p):
             photos[p.suffix.lower() or "."] += 1
         elif include_videos and is_video(p):
@@ -128,6 +133,8 @@ class OrganizerPlan:
             f"Parasites : {s.junk}",
             f"Erreurs : {s.errors}",
         ]
+        if s.cache_hits or s.cache_misses:
+            lines.append(f"Cache : {s.cache_hits} hits / {s.cache_misses} miss")
         return "\n".join(lines)
 
     def refresh_stats(self, inventory: MediaStats | None = None) -> None:
@@ -147,25 +154,37 @@ class OrganizerPlan:
         self.stats.sync_dates = sum(1 for m in self.moves if m.reason == "sync_dates")
         self.stats.errors = len(self.errors)
         self.stats.analyzed = True
+        # cache_hits / cache_misses définis par build_plan
 
 
 def collect_images(root: Path) -> list[Path]:
-    return sorted(p for p in root.rglob("*") if is_image(p))
+    return sorted(
+        p for p in root.rglob("*") if not is_under_pycture_meta(p) and is_image(p)
+    )
 
 
 def collect_videos(root: Path) -> list[Path]:
-    return sorted(p for p in root.rglob("*") if is_video(p))
+    return sorted(
+        p for p in root.rglob("*") if not is_under_pycture_meta(p) and is_video(p)
+    )
 
 
 def collect_media(root: Path, include_videos: bool = True) -> list[Path]:
     return sorted(
-        p for p in root.rglob("*") if is_image(p) or (include_videos and is_video(p))
+        p
+        for p in root.rglob("*")
+        if not is_under_pycture_meta(p)
+        and (is_image(p) or (include_videos and is_video(p)))
     )
 
 
 def collect_junk_files(root: Path) -> list[Path]:
     """Fichiers macOS AppleDouble (._*) et autres parasites système."""
-    return sorted(p for p in root.rglob("*") if p.is_file() and is_junk_file(p))
+    return sorted(
+        p
+        for p in root.rglob("*")
+        if p.is_file() and not is_under_pycture_meta(p) and is_junk_file(p)
+    )
 
 
 def _sanitize_name(name: str) -> str:
@@ -283,186 +302,195 @@ def build_plan(options: OrganizerOptions, progress_cb=None) -> OrganizerPlan:
     inventory = scan_inventory(source, include_videos=options.include_videos)
     media = collect_media(source, include_videos=options.include_videos)
 
-    if progress_cb:
-        progress_cb(0, max(len(media), 1), "Recherche des doublons…")
-
-    plan.duplicate_groups = find_duplicates(media, progress_cb=progress_cb)
-
-    # Fichiers à exclure du déplacement principal (doublons non conservés)
-    excluded: set[str] = set()
-    if options.duplicate_action != DuplicateAction.KEEP_BOTH:
-        for group in plan.duplicate_groups:
-            for dup in group.duplicates:
-                try:
-                    excluded.add(str(dup.resolve()).casefold())
-                except OSError:
-                    excluded.add(str(dup).casefold())
-
-    # 1) Traiter d'abord les doublons (libère les chemins cibles)
-    if options.duplicate_action == DuplicateAction.MOVE_TO_DOUBLONS:
-        doublons_dir = base / "_doublons"
-        for group in plan.duplicate_groups:
-            for dup in group.duplicates:
-                dest = _unique_destination(doublons_dir / dup.name)
-                plan.moves.append(
-                    PlannedMove(source=dup, destination=dest, reason="doublon")
-                )
-    elif options.duplicate_action == DuplicateAction.DELETE:
-        for group in plan.duplicate_groups:
-            for dup in group.duplicates:
-                plan.moves.append(
-                    PlannedMove(source=dup, destination=Path(), reason="suppression")
-                )
-
-    vacating = {
-        str(m.source.resolve()).casefold()
-        for m in plan.moves
-        if m.reason in ("doublon", "suppression")
-    }
-
-    # 2) Organiser les fichiers conservés
-    total = len(media) or 1
-    used_names: dict[Path, set[str]] = {}
-
-    for i, path in enumerate(media):
+    cache = FolderCache.open(source)
+    try:
         if progress_cb:
-            progress_cb(i + 1, total, f"Analyse : {path.name}")
+            progress_cb(0, max(len(media), 1), "Recherche des doublons…")
 
-        try:
-            resolved_key = str(path.resolve()).casefold()
-        except OSError:
-            resolved_key = str(path).casefold()
-        if resolved_key in excluded:
-            continue
+        plan.duplicate_groups = find_duplicates(
+            media, progress_cb=progress_cb, cache=cache
+        )
 
-        try:
-            capture = get_capture_info(path)
-            dt = capture.value
-            video = is_video(path)
+        # Fichiers à exclure du déplacement principal (doublons non conservés)
+        excluded: set[str] = set()
+        if options.duplicate_action != DuplicateAction.KEEP_BOTH:
+            for group in plan.duplicate_groups:
+                for dup in group.duplicates:
+                    try:
+                        excluded.add(str(dup.resolve()).casefold())
+                    except OSError:
+                        excluded.add(str(dup).casefold())
 
-            # Dossier année (ex. 2005) : ne pas sortir vers une autre année
-            # sauf EXIF Original/Digitized fiable.
-            force_sans_exif = False
-            if year_hint is not None and not video and dt.year != year_hint:
-                if capture.source in ("exif_original", "exif_digitized"):
-                    force_sans_exif = False  # on fait confiance à l'EXIF
-                else:
-                    # mtime, DateTime faible, ou nom avec une autre année → rester
-                    force_sans_exif = True
-
-            folder = _target_folder(
-                dt,
-                options,
-                base,
-                video=video,
-                no_exif=force_sans_exif,
-                year_hint=year_hint,
-            )
-            if video:
-                reason = "video"
-            elif force_sans_exif:
-                reason = "sans_exif"
-            else:
-                reason = "organisation"
-
-            # Renommer seulement avec une date fiable (EXIF prise de vue ou nom)
-            if (
-                options.rename_with_datetime
-                and capture.is_reliable
-                and not force_sans_exif
-            ):
-                new_name = f"{format_datetime_for_filename(dt)}{path.suffix.lower()}"
-            else:
-                new_name = path.name
-
-            names = used_names.setdefault(folder, set())
-            candidate = folder / new_name
-            conflict = False
-            if new_name in names:
-                conflict = True
-            elif candidate.exists():
-                try:
-                    cand_key = str(candidate.resolve()).casefold()
-                except OSError:
-                    cand_key = str(candidate).casefold()
-                if cand_key != resolved_key and cand_key not in vacating:
-                    conflict = True
-
-            if conflict:
-                stem = Path(new_name).stem
-                suffix = Path(new_name).suffix
-                n = 1
-                while True:
-                    alt = f"{stem}_{n}{suffix}"
-                    alt_path = folder / alt
-                    taken = alt in names
-                    if not taken and alt_path.exists():
-                        try:
-                            alt_key = str(alt_path.resolve()).casefold()
-                        except OSError:
-                            alt_key = str(alt_path).casefold()
-                        if alt_key != resolved_key and alt_key not in vacating:
-                            taken = True
-                    if not taken:
-                        new_name = alt
-                        break
-                    n += 1
-            names.add(new_name)
-
-            dest = folder / new_name
-            sync_dt = dt if capture.is_reliable and not force_sans_exif else None
-
-            if _same_file(dest, path):
-                plan.skipped.append((path, "Déjà à la bonne place"))
-                if options.sync_file_dates and sync_dt is not None:
+        # 1) Traiter d'abord les doublons (libère les chemins cibles)
+        if options.duplicate_action == DuplicateAction.MOVE_TO_DOUBLONS:
+            doublons_dir = base / "_doublons"
+            for group in plan.duplicate_groups:
+                for dup in group.duplicates:
+                    dest = _unique_destination(doublons_dir / dup.name)
                     plan.moves.append(
-                        PlannedMove(
-                            source=path,
-                            destination=path,
-                            reason="sync_dates",
-                            capture_dt=sync_dt,
-                        )
+                        PlannedMove(source=dup, destination=dest, reason="doublon")
                     )
-                continue
+        elif options.duplicate_action == DuplicateAction.DELETE:
+            for group in plan.duplicate_groups:
+                for dup in group.duplicates:
+                    plan.moves.append(
+                        PlannedMove(source=dup, destination=Path(), reason="suppression")
+                    )
 
-            plan.moves.append(
-                PlannedMove(
-                    source=path,
-                    destination=dest,
-                    reason=reason,
-                    capture_dt=sync_dt,
-                )
-            )
-        except Exception as exc:
-            plan.errors.append((path, str(exc)))
+        vacating = {
+            str(m.source.resolve()).casefold()
+            for m in plan.moves
+            if m.reason in ("doublon", "suppression")
+        }
 
-    # Fichiers parasites macOS (._* , .DS_Store, …)
-    if options.clean_junk:
-        roots = {source, base}
-        if options.output_dir:
-            out = options.output_dir.resolve()
-            if out.is_dir():
-                roots.add(out)
-        junk: list[Path] = []
-        for root in roots:
-            if root.is_dir():
-                junk.extend(collect_junk_files(root))
-        seen: set[str] = set()
-        for j in junk:
+        # 2) Organiser les fichiers conservés
+        total = len(media) or 1
+        used_names: dict[Path, set[str]] = {}
+
+        for i, path in enumerate(media):
+            if progress_cb:
+                progress_cb(i + 1, total, f"Analyse : {path.name}")
+
             try:
-                rj = str(j.resolve()).casefold()
+                resolved_key = str(path.resolve()).casefold()
             except OSError:
-                rj = str(j).casefold()
-            if rj in seen:
+                resolved_key = str(path).casefold()
+            if resolved_key in excluded:
                 continue
-            seen.add(rj)
-            plan.junk_files.append(j)
-            plan.moves.append(
-                PlannedMove(source=j, destination=Path(), reason="junk")
-            )
 
-    plan.refresh_stats(inventory)
-    return plan
+            try:
+                capture = get_capture_info(path, cache=cache)
+                dt = capture.value
+                video = is_video(path)
+
+                # Dossier année (ex. 2005) : ne pas sortir vers une autre année
+                # sauf EXIF Original/Digitized fiable.
+                force_sans_exif = False
+                if year_hint is not None and not video and dt.year != year_hint:
+                    if capture.source in ("exif_original", "exif_digitized"):
+                        force_sans_exif = False  # on fait confiance à l'EXIF
+                    else:
+                        # mtime, DateTime faible, ou nom avec une autre année → rester
+                        force_sans_exif = True
+
+                folder = _target_folder(
+                    dt,
+                    options,
+                    base,
+                    video=video,
+                    no_exif=force_sans_exif,
+                    year_hint=year_hint,
+                )
+                if video:
+                    reason = "video"
+                elif force_sans_exif:
+                    reason = "sans_exif"
+                else:
+                    reason = "organisation"
+
+                # Renommer seulement avec une date fiable (EXIF prise de vue ou nom)
+                if (
+                    options.rename_with_datetime
+                    and capture.is_reliable
+                    and not force_sans_exif
+                ):
+                    new_name = f"{format_datetime_for_filename(dt)}{path.suffix.lower()}"
+                else:
+                    new_name = path.name
+
+                names = used_names.setdefault(folder, set())
+                candidate = folder / new_name
+                conflict = False
+                if new_name in names:
+                    conflict = True
+                elif candidate.exists():
+                    try:
+                        cand_key = str(candidate.resolve()).casefold()
+                    except OSError:
+                        cand_key = str(candidate).casefold()
+                    if cand_key != resolved_key and cand_key not in vacating:
+                        conflict = True
+
+                if conflict:
+                    stem = Path(new_name).stem
+                    suffix = Path(new_name).suffix
+                    n = 1
+                    while True:
+                        alt = f"{stem}_{n}{suffix}"
+                        alt_path = folder / alt
+                        taken = alt in names
+                        if not taken and alt_path.exists():
+                            try:
+                                alt_key = str(alt_path.resolve()).casefold()
+                            except OSError:
+                                alt_key = str(alt_path).casefold()
+                            if alt_key != resolved_key and alt_key not in vacating:
+                                taken = True
+                        if not taken:
+                            new_name = alt
+                            break
+                        n += 1
+                names.add(new_name)
+
+                dest = folder / new_name
+                sync_dt = dt if capture.is_reliable and not force_sans_exif else None
+
+                if _same_file(dest, path):
+                    plan.skipped.append((path, "Déjà à la bonne place"))
+                    if options.sync_file_dates and sync_dt is not None:
+                        plan.moves.append(
+                            PlannedMove(
+                                source=path,
+                                destination=path,
+                                reason="sync_dates",
+                                capture_dt=sync_dt,
+                            )
+                        )
+                    continue
+
+                plan.moves.append(
+                    PlannedMove(
+                        source=path,
+                        destination=dest,
+                        reason=reason,
+                        capture_dt=sync_dt,
+                    )
+                )
+            except Exception as exc:
+                plan.errors.append((path, str(exc)))
+
+        # Fichiers parasites macOS (._* , .DS_Store, …)
+        if options.clean_junk:
+            roots = {source, base}
+            if options.output_dir:
+                out = options.output_dir.resolve()
+                if out.is_dir():
+                    roots.add(out)
+            junk: list[Path] = []
+            for root in roots:
+                if root.is_dir():
+                    junk.extend(collect_junk_files(root))
+            seen: set[str] = set()
+            for j in junk:
+                try:
+                    rj = str(j.resolve()).casefold()
+                except OSError:
+                    rj = str(j).casefold()
+                if rj in seen:
+                    continue
+                seen.add(rj)
+                plan.junk_files.append(j)
+                plan.moves.append(
+                    PlannedMove(source=j, destination=Path(), reason="junk")
+                )
+
+        cache.purge_missing()
+        plan.refresh_stats(inventory)
+        plan.stats.cache_hits = cache.stats.hits
+        plan.stats.cache_misses = cache.stats.misses
+        return plan
+    finally:
+        cache.close()
 
 
 def _remove_appledouble_sidecar(path: Path) -> None:

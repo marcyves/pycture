@@ -12,14 +12,16 @@ from pathlib import Path
 from PIL import Image
 from PIL.ExifTags import IFD
 
-from pycture.duplicates import find_duplicates
+from pycture.duplicates import file_digest, find_duplicates
 from pycture.exif_utils import get_capture_info, parse_datetime_from_filename
+from pycture.folder_cache import FolderCache, clear_folder_cache, is_under_pycture_meta
 from pycture.merge import MergeOptions, build_merge_plan, execute_merge_plan
 from pycture.organizer import (
     DuplicateAction,
     FolderStructure,
     OrganizerOptions,
     build_plan,
+    collect_media,
     organization_base,
     scan_inventory,
 )
@@ -261,5 +263,91 @@ def test_merge_two_identical_sources_only_one_copied() -> None:
         execute_merge_plan(plan, dry_run=False)
         copied = list(dst.rglob("*.jpg"))
         assert len(copied) == 1
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_folder_cache_digest_hit_and_invalidate() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_cache_")).resolve()
+    try:
+        path = tmp / "a.jpg"
+        Image.new("RGB", (8, 8), (1, 2, 3)).save(path)
+        with FolderCache.open(tmp) as cache:
+            d1 = file_digest(path, cache=cache)
+            assert cache.stats.misses == 1
+            assert cache.stats.hits == 0
+            d2 = file_digest(path, cache=cache)
+            assert d1 == d2
+            assert cache.stats.hits == 1
+            # Invalider via mtime
+            st = path.stat()
+            os.utime(path, (st.st_atime + 10, st.st_mtime + 10))
+            d3 = file_digest(path, cache=cache)
+            assert d3 == d1
+            assert cache.stats.misses == 2
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_folder_cache_capture_hit() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_cache_cap_")).resolve()
+    try:
+        path = tmp / "2005-08-15 14-30-22.jpg"
+        Image.new("RGB", (6, 6), (4, 4, 4)).save(path)
+        with FolderCache.open(tmp) as cache:
+            c1 = get_capture_info(path, cache=cache)
+            assert c1.source == "filename"
+            assert cache.stats.misses == 1
+            c2 = get_capture_info(path, cache=cache)
+            assert c2.value == c1.value
+            assert c2.source == c1.source
+            assert cache.stats.hits == 1
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_collect_media_skips_pycture_meta() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_meta_")).resolve()
+    try:
+        Image.new("RGB", (4, 4), (1, 1, 1)).save(tmp / "ok.jpg")
+        meta = tmp / ".pycture"
+        meta.mkdir()
+        Image.new("RGB", (4, 4), (2, 2, 2)).save(meta / "hidden.jpg")
+        assert is_under_pycture_meta(meta / "hidden.jpg")
+        media = collect_media(tmp, include_videos=False)
+        assert len(media) == 1
+        assert media[0].name == "ok.jpg"
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_folder_cache_readonly_root_disabled() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_ro_")).resolve()
+    try:
+        os.chmod(tmp, 0o555)
+        cache = FolderCache.open(tmp)
+        try:
+            assert cache.enabled is False
+            path = tmp / "x.jpg"
+            # Ne peut pas créer de fichier non plus ; juste vérifier get/put no-op
+            assert cache.get_digest(path) is None
+            cache.put_digest(path, "abc")
+        finally:
+            cache.close()
+    finally:
+        os.chmod(tmp, 0o755)
+        shutil.rmtree(tmp)
+
+
+def test_clear_folder_cache() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="pycture_clear_")).resolve()
+    try:
+        path = tmp / "a.jpg"
+        Image.new("RGB", (3, 3), (0, 0, 0)).save(path)
+        with FolderCache.open(tmp) as cache:
+            file_digest(path, cache=cache)
+        assert (tmp / ".pycture" / "cache.sqlite").is_file()
+        assert clear_folder_cache(tmp) is True
+        assert not (tmp / ".pycture" / "cache.sqlite").exists()
     finally:
         shutil.rmtree(tmp)

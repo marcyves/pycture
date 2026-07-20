@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .duplicates import file_digest
+from .folder_cache import FolderCache
 from .organizer import collect_media, unique_destination
 
 
@@ -30,6 +31,8 @@ class MergePlan:
     actions: list[PlannedMerge] = field(default_factory=list)
     errors: list[tuple[Path, str]] = field(default_factory=list)
     move: bool = False
+    cache_hits: int = 0
+    cache_misses: int = 0
 
     @property
     def to_merge(self) -> list[PlannedMerge]:
@@ -52,6 +55,8 @@ class MergePlan:
             f"Erreurs : {len(self.errors)}",
             f"Mode : {'déplacer' if self.move else 'copier'}",
         ]
+        if self.cache_hits or self.cache_misses:
+            lines.append(f"Cache : {self.cache_hits} hits / {self.cache_misses} miss")
         return "\n".join(lines)
 
 
@@ -74,6 +79,7 @@ def _index_destination_digests(
     destination: Path,
     include_videos: bool,
     progress_cb=None,
+    cache=None,
 ) -> dict[str, Path]:
     """SHA-256 → chemin pour tous les médias déjà présents sous Destination."""
     digests: dict[str, Path] = {}
@@ -85,7 +91,7 @@ def _index_destination_digests(
         if progress_cb:
             progress_cb(i + 1, total, f"Empreinte dest : {path.name}")
         try:
-            digests[file_digest(path)] = path
+            digests[file_digest(path, cache=cache)] = path
         except OSError:
             continue
     return digests
@@ -107,62 +113,73 @@ def build_merge_plan(options: MergeOptions, progress_cb=None) -> MergePlan:
         plan.errors.append((source, "Source et destination sont le même dossier"))
         return plan
 
-    known_digests = _index_destination_digests(
-        destination,
-        include_videos=options.include_videos,
-        progress_cb=progress_cb,
-    )
-    reserved_dests: set[str] = set()
-
-    media = collect_media(source, include_videos=options.include_videos)
-    # Ne pas re-traiter des fichiers déjà sous Destination (source englobante)
-    media = [p for p in media if not _is_under(p, destination)]
-    total = len(media) or 1
-
-    for i, path in enumerate(media):
-        if progress_cb:
-            progress_cb(i + 1, total, f"Analyse fusion : {path.name}")
-
-        try:
-            digest = file_digest(path)
-        except OSError as exc:
-            plan.errors.append((path, str(exc)))
-            continue
-
-        if digest in known_digests:
-            plan.actions.append(
-                PlannedMerge(
-                    source=path,
-                    destination=known_digests[digest],
-                    reason="skip_duplicate",
-                )
-            )
-            continue
-
-        try:
-            rel = path.relative_to(source)
-        except ValueError:
-            plan.errors.append((path, "Hors du dossier source"))
-            continue
-
-        dest_cand = destination / rel
-        needs_rename = dest_cand.exists() or _path_key(dest_cand) in reserved_dests
-        if needs_rename:
-            # Contenu différent (sinon déjà filtré par digest) ou collision planifiée
-            dest = unique_destination(dest_cand, reserved=reserved_dests)
-            reason = "rename_conflict"
-        else:
-            dest = dest_cand
-            reason = "merge"
-
-        plan.actions.append(
-            PlannedMerge(source=path, destination=dest, reason=reason)
+    src_cache = FolderCache.open(source)
+    dst_cache = FolderCache.open(destination)
+    try:
+        known_digests = _index_destination_digests(
+            destination,
+            include_videos=options.include_videos,
+            progress_cb=progress_cb,
+            cache=dst_cache,
         )
-        known_digests[digest] = dest
-        reserved_dests.add(_path_key(dest))
-        reserved_dests.add(str(dest).casefold())
+        reserved_dests: set[str] = set()
 
-    return plan
+        media = collect_media(source, include_videos=options.include_videos)
+        # Ne pas re-traiter des fichiers déjà sous Destination (source englobante)
+        media = [p for p in media if not _is_under(p, destination)]
+        total = len(media) or 1
+
+        for i, path in enumerate(media):
+            if progress_cb:
+                progress_cb(i + 1, total, f"Analyse fusion : {path.name}")
+
+            try:
+                digest = file_digest(path, cache=src_cache)
+            except OSError as exc:
+                plan.errors.append((path, str(exc)))
+                continue
+
+            if digest in known_digests:
+                plan.actions.append(
+                    PlannedMerge(
+                        source=path,
+                        destination=known_digests[digest],
+                        reason="skip_duplicate",
+                    )
+                )
+                continue
+
+            try:
+                rel = path.relative_to(source)
+            except ValueError:
+                plan.errors.append((path, "Hors du dossier source"))
+                continue
+
+            dest_cand = destination / rel
+            needs_rename = dest_cand.exists() or _path_key(dest_cand) in reserved_dests
+            if needs_rename:
+                # Contenu différent (sinon déjà filtré par digest) ou collision planifiée
+                dest = unique_destination(dest_cand, reserved=reserved_dests)
+                reason = "rename_conflict"
+            else:
+                dest = dest_cand
+                reason = "merge"
+
+            plan.actions.append(
+                PlannedMerge(source=path, destination=dest, reason=reason)
+            )
+            known_digests[digest] = dest
+            reserved_dests.add(_path_key(dest))
+            reserved_dests.add(str(dest).casefold())
+
+        src_cache.purge_missing()
+        dst_cache.purge_missing()
+        plan.cache_hits = src_cache.stats.hits + dst_cache.stats.hits
+        plan.cache_misses = src_cache.stats.misses + dst_cache.stats.misses
+        return plan
+    finally:
+        src_cache.close()
+        dst_cache.close()
 
 
 def execute_merge_plan(

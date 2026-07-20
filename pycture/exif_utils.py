@@ -230,17 +230,8 @@ def _datetime_from_root_datetime(exif) -> datetime | None:
     return _parse_exif_datetime(tagged.get("DateTime"))
 
 
-def get_capture_info(path: Path) -> CaptureDate:
-    """
-    Date de prise de vue + provenance.
-
-    Ordre :
-    1. EXIF DateTimeOriginal
-    2. EXIF DateTimeDigitized
-    3. Date explicite dans le nom de fichier
-    4. EXIF DateTime (tag 306, souvent date d'édition)
-    5. Date de modification du fichier
-    """
+def _compute_capture_info(path: Path) -> CaptureDate:
+    """Calcul sans cache (EXIF / nom / mtime)."""
     if is_video(path):
         named = parse_datetime_from_filename(path.name)
         if named:
@@ -284,9 +275,30 @@ def get_capture_info(path: Path) -> CaptureDate:
     return CaptureDate(_file_datetime(path), "mtime")
 
 
-def get_capture_datetime(path: Path) -> datetime:
+def get_capture_info(path: Path, cache=None) -> CaptureDate:
+    """
+    Date de prise de vue + provenance (avec cache optionnel).
+
+    Ordre :
+    1. EXIF DateTimeOriginal
+    2. EXIF DateTimeDigitized
+    3. Date explicite dans le nom de fichier
+    4. EXIF DateTime (tag 306, souvent date d'édition)
+    5. Date de modification du fichier
+    """
+    if cache is not None:
+        cached = cache.get_capture(path)
+        if cached is not None:
+            return cached
+    capture = _compute_capture_info(path)
+    if cache is not None:
+        cache.put_capture(path, capture)
+    return capture
+
+
+def get_capture_datetime(path: Path, cache=None) -> datetime:
     """Date de prise de vue (compatibilité)."""
-    return get_capture_info(path).value
+    return get_capture_info(path, cache=cache).value
 
 
 def format_datetime_for_filename(dt: datetime) -> str:

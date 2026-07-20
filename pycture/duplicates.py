@@ -59,8 +59,16 @@ class DuplicateGroup:
         return [p for p in self.paths if p.resolve() != keep.resolve()]
 
 
-def file_digest(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    """Empreinte SHA-256 du contenu du fichier."""
+def file_digest(
+    path: Path,
+    chunk_size: int = 1024 * 1024,
+    cache=None,
+) -> str:
+    """Empreinte SHA-256 du contenu du fichier (avec cache optionnel)."""
+    if cache is not None:
+        cached = cache.get_digest(path)
+        if cached is not None:
+            return cached
     h = hashlib.sha256()
     with path.open("rb") as f:
         while True:
@@ -68,10 +76,13 @@ def file_digest(path: Path, chunk_size: int = 1024 * 1024) -> str:
             if not chunk:
                 break
             h.update(chunk)
-    return h.hexdigest()
+    digest = h.hexdigest()
+    if cache is not None:
+        cache.put_digest(path, digest)
+    return digest
 
 
-def find_duplicates(paths: list[Path], progress_cb=None) -> list[DuplicateGroup]:
+def find_duplicates(paths: list[Path], progress_cb=None, cache=None) -> list[DuplicateGroup]:
     """
     Regroupe les fichiers par empreinte.
     Ne retourne que les groupes avec au moins 2 fichiers.
@@ -91,7 +102,7 @@ def find_duplicates(paths: list[Path], progress_cb=None) -> list[DuplicateGroup]
         if progress_cb:
             progress_cb(i + 1, total, f"Empreinte : {path.name}")
         try:
-            digest = file_digest(path)
+            digest = file_digest(path, cache=cache)
             by_hash[digest].append(path)
         except OSError:
             continue

@@ -25,6 +25,7 @@ Application GUI Python pour nettoyer et organiser un dossier de photos (et ses s
 - Aperçu avant application + miniatures
 - Mémorisation du dernier dossier utilisé (`~/.pycture/settings.json`)
 - **Fusion de dossiers** : copie (ou déplacement) Source → Destination en préservant l’arborescence, sans doublons ni écrasement
+- **Cache local** (`.pycture/cache.sqlite`) : empreintes SHA-256 et dates EXIF pour accélérer les analyses suivantes
 - **Import photothèque Apple** (`.photoslibrary`) : copie les originaux vers un dossier, puis organisation Pycture
 
 ## Stratégie de datation
@@ -116,6 +117,16 @@ Règles de conflit :
 
 Les vidéos suivent l’option « Inclure les vidéos ».
 
+### Cache d’analyse (`.pycture/cache.sqlite`)
+
+À la racine de chaque dossier analysé, Pycture crée un cache SQLite :
+
+- **empreintes SHA-256** et **dates de capture** (EXIF / nom / mtime) ;
+- invalidation automatique si la **taille** ou le **mtime** du fichier change ;
+- le dossier `.pycture/` est ignoré lors de l’organisation / fusion.
+
+Bouton **Vider le cache…** : efface le cache du dossier source (et de la destination si renseignée). Utile après une sync douteuse. Le journal d’analyse affiche `Cache : N hits / M miss`.
+
 ### Import depuis Photos (Apple)
 
 Pycture peut **exporter** les originaux d’une photothèque macOS (paquet `.photoslibrary`) vers un dossier de votre choix, puis les organiser comme n’importe quel autre dossier source.
@@ -137,7 +148,7 @@ Notes :
 
 ## Tests
 
-La suite `pytest` couvre le cœur métier (dates, doublons, organisation, fusion, inventaire, export photothèque minimal) :
+La suite `pytest` couvre le cœur métier (dates, doublons, organisation, fusion, cache, inventaire, export photothèque minimal) :
 
 ```bash
 source .venv/bin/activate
@@ -168,6 +179,7 @@ pycture/
 │   ├── exif_utils.py    # Date EXIF + filtres fichiers
 │   ├── photoslibrary.py # Export depuis .photoslibrary Apple
 │   ├── merge.py         # Fusion de dossiers sans doublons
+│   ├── folder_cache.py  # Cache SQLite local (.pycture/)
 │   ├── thumbnails.py    # Miniatures
 │   └── settings.py      # Préférences (dernier chemin)
 ├── tests/
