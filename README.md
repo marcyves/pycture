@@ -4,6 +4,7 @@ Application GUI Python pour nettoyer et organiser un dossier de photos (et ses s
 
 **Dépôt :** [github.com/marcyves/pycture](https://github.com/marcyves/pycture)
 
+[![CI](https://github.com/marcyves/pycture/actions/workflows/python-app.yml/badge.svg)](https://github.com/marcyves/pycture/actions/workflows/python-app.yml)
 [![Issues](https://img.shields.io/github/issues/marcyves/pycture?style=flat-square)](https://github.com/marcyves/pycture/issues)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg?style=flat-square)](./LICENSE)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Marc%20Augier-0A66C2?style=flat-square&logo=linkedin)](https://linkedin.com/in/marcaugier)
@@ -101,17 +102,38 @@ python -m pycture
 
 ### Import depuis Photos (Apple)
 
-1. Renseigner le champ **Destination** (obligatoire)
+Pycture peut **exporter** les originaux d’une photothèque macOS (paquet `.photoslibrary`) vers un dossier de votre choix, puis les organiser comme n’importe quel autre dossier source.
+
+**Important :** la photothèque n’est jamais modifiée — uniquement des copies.
+
+1. Renseigner le champ **Destination** (obligatoire pour cet import)
 2. Cliquer sur **Photothèque Apple…**
-3. Sélectionner un paquet `Nom.photoslibrary`
-4. Les originaux y sont **copiés** (la photothèque n’est pas modifiée)
-5. Le dossier source Pycture est basculé sur la destination → **Analyser** puis **Appliquer**
+3. Sélectionner un paquet `Nom.photoslibrary` (souvent dans `~/Pictures`)
+4. Pycture parcourt `originals/`, lit éventuellement `Photos.sqlite` pour retrouver les noms d’origine, et **copie** les fichiers vers la destination
+5. Le dossier source Pycture est basculé sur cette destination → **Analyser** puis **Appliquer**
 
 Notes :
 
-- Les médias uniquement dans iCloud (non téléchargés sur le Mac) ne peuvent pas être copiés.
-- Accordez à Terminal / Python l’accès aux fichiers (Réglages → Confidentialité et sécurité) si macOS bloque la lecture.
+- Les médias uniquement dans iCloud (non téléchargés sur le Mac) sont ignorés et listés comme absents.
+- Accordez à Terminal / Python un accès disque complet (Réglages → Confidentialité et sécurité) si macOS bloque la lecture de la photothèque.
 - Les vidéos suivent l’option « Inclure les vidéos ».
+- Sur place (sans destination) reste possible pour un dossier photos classique ; la photothèque Apple exige toujours une destination.
+
+## Tests
+
+La suite `pytest` couvre le cœur métier (dates, doublons, organisation, inventaire, export photothèque minimal) :
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt pytest
+pytest
+```
+
+Fichiers concernés :
+
+- `tests/test_core.py` — tests unitaires
+- `pytest.ini` — `pythonpath = .` pour importer le package local
+- `.github/workflows/python-app.yml` — CI (flake8 + pytest) sur chaque push / PR vers `main`
 
 ## Structure du projet
 
@@ -119,15 +141,20 @@ Notes :
 pycture/
 ├── main.py
 ├── requirements.txt
+├── pytest.ini
 ├── LICENSE
+├── .github/workflows/
+│   └── python-app.yml  # CI GitHub Actions
 ├── pycture/
-│   ├── gui.py          # Interface graphique
-│   ├── organizer.py    # Organisation, renommage, plan d'actions
-│   ├── duplicates.py   # Détection des doublons
-│   ├── exif_utils.py   # Date EXIF + filtres fichiers
+│   ├── gui.py           # Interface graphique
+│   ├── organizer.py     # Organisation, renommage, plan d'actions
+│   ├── duplicates.py    # Détection des doublons
+│   ├── exif_utils.py    # Date EXIF + filtres fichiers
 │   ├── photoslibrary.py # Export depuis .photoslibrary Apple
-│   ├── thumbnails.py   # Miniatures
-│   └── settings.py     # Préférences (dernier chemin)
+│   ├── thumbnails.py    # Miniatures
+│   └── settings.py      # Préférences (dernier chemin)
+├── tests/
+│   └── test_core.py
 └── README.md
 ```
 
