@@ -452,7 +452,7 @@ class PyctureApp(tk.Tk):
                 )
                 self.after(0, lambda: self._on_photos_library_done(result))
             except Exception as exc:
-                self.after(0, lambda: self._on_error(exc))
+                self.after(0, lambda e=exc: self._on_error(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -751,7 +751,7 @@ class PyctureApp(tk.Tk):
                 plan = build_plan(options, progress_cb=self._progress_cb)
                 self.after(0, lambda: self._on_preview_done(plan, options))
             except Exception as exc:
-                self.after(0, lambda: self._on_error(exc))
+                self.after(0, lambda e=exc: self._on_error(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -872,7 +872,7 @@ class PyctureApp(tk.Tk):
                     removed = remove_empty_dirs(root, dry_run=False)
                 self.after(0, lambda: self._on_apply_done(logs, removed))
             except Exception as exc:
-                self.after(0, lambda: self._on_error(exc))
+                self.after(0, lambda e=exc: self._on_error(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
