@@ -23,6 +23,7 @@ Application GUI Python pour nettoyer et organiser un dossier de photos (et ses s
 - Nettoyage des dossiers vides
 - Aperçu avant application + miniatures
 - Mémorisation du dernier dossier utilisé (`~/.pycture/settings.json`)
+- **Import photothèque Apple** (`.photoslibrary`) : copie les originaux vers un dossier, puis organisation Pycture
 
 ## Stratégie de datation
 
@@ -98,6 +99,20 @@ python -m pycture
 3. Cliquer sur **Analyser (aperçu)** et vérifier le journal / les miniatures
 4. Cliquer sur **Appliquer** pour exécuter les actions
 
+### Import depuis Photos (Apple)
+
+1. Renseigner le champ **Destination** (obligatoire)
+2. Cliquer sur **Photothèque Apple…**
+3. Sélectionner un paquet `Nom.photoslibrary`
+4. Les originaux y sont **copiés** (la photothèque n’est pas modifiée)
+5. Le dossier source Pycture est basculé sur la destination → **Analyser** puis **Appliquer**
+
+Notes :
+
+- Les médias uniquement dans iCloud (non téléchargés sur le Mac) ne peuvent pas être copiés.
+- Accordez à Terminal / Python l’accès aux fichiers (Réglages → Confidentialité et sécurité) si macOS bloque la lecture.
+- Les vidéos suivent l’option « Inclure les vidéos ».
+
 ## Structure du projet
 
 ```
@@ -110,6 +125,7 @@ pycture/
 │   ├── organizer.py    # Organisation, renommage, plan d'actions
 │   ├── duplicates.py   # Détection des doublons
 │   ├── exif_utils.py   # Date EXIF + filtres fichiers
+│   ├── photoslibrary.py # Export depuis .photoslibrary Apple
 │   ├── thumbnails.py   # Miniatures
 │   └── settings.py     # Préférences (dernier chemin)
 └── README.md

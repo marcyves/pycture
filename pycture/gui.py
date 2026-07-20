@@ -19,6 +19,7 @@ from .organizer import (
     remove_empty_dirs,
     scan_inventory,
 )
+from .photoslibrary import export_photos_library, is_photos_library
 from .settings import (
     get_last_output_dir,
     get_last_source_dir,
@@ -74,11 +75,16 @@ class PyctureApp(tk.Tk):
         ttk.Button(paths, text="Parcourir…", command=self._browse_output).grid(
             row=0, column=5
         )
+        ttk.Button(
+            paths,
+            text="Photothèque Apple…",
+            command=self._import_photos_library,
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
         ttk.Label(
             paths,
-            text="Destination vide = réorganiser sur place",
+            text="Destination : optionnelle (sur place) — obligatoire pour Photothèque Apple",
             foreground="#666",
-        ).grid(row=1, column=3, columnspan=3, sticky=tk.W, pady=(4, 0))
+        ).grid(row=1, column=3, columnspan=3, sticky=tk.W, pady=(8, 0))
 
         # Options sur 2 colonnes
         opts = ttk.LabelFrame(main, text="Options", padding=10)
@@ -362,6 +368,131 @@ class PyctureApp(tk.Tk):
         if path:
             self.output_var.set(path)
             remember_paths(output_dir=path)
+
+    def _import_photos_library(self) -> None:
+        if self._busy:
+            return
+
+        # Destination obligatoire en mode photothèque
+        dest = self.output_var.get().strip()
+        if not dest:
+            messagebox.showwarning(
+                "Destination obligatoire",
+                "En mode Photothèque Apple, choisissez d'abord un dossier de destination\n"
+                "(où copier les originaux).",
+            )
+            self._browse_output()
+            dest = self.output_var.get().strip()
+            if not dest:
+                return
+
+        dest_path = Path(dest)
+        if not dest_path.exists():
+            try:
+                dest_path.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                messagebox.showerror(
+                    "Destination invalide",
+                    f"Impossible de créer le dossier de destination :\n{exc}",
+                )
+                return
+        if not dest_path.is_dir():
+            messagebox.showerror(
+                "Destination invalide",
+                f"Ce chemin n'est pas un dossier :\n{dest_path}",
+            )
+            return
+
+        # Sur macOS, .photoslibrary est un package (dossier)
+        library = filedialog.askdirectory(
+            title="Choisir une photothèque Apple (.photoslibrary)",
+        )
+        if not library:
+            return
+        lib_path = Path(library)
+        if not is_photos_library(lib_path):
+            messagebox.showerror(
+                "Photothèque invalide",
+                "Sélectionnez un paquet « Nom.photoslibrary »\n"
+                "(dossier dont le nom se termine par .photoslibrary).",
+            )
+            return
+
+        try:
+            if dest_path.resolve() == lib_path.resolve() or lib_path.resolve() in dest_path.resolve().parents:
+                messagebox.showerror(
+                    "Destination invalide",
+                    "La destination ne peut pas être la photothèque elle-même\n"
+                    "ni un dossier à l'intérieur.",
+                )
+                return
+        except OSError:
+            pass
+
+        if not messagebox.askyesno(
+            "Exporter la photothèque",
+            f"Copier les originaux de :\n{lib_path}\n\nvers :\n{dest_path}\n\n"
+            "La photothèque ne sera pas modifiée.\n"
+            "Les fichiers uniquement dans iCloud (non téléchargés) seront ignorés.\n\n"
+            "Continuer ?",
+        ):
+            return
+
+        self._set_busy(True)
+        self._append_log(f"\n=== Export photothèque Apple ===\n{lib_path}\n→ {dest_path}\n")
+        include_videos = self.videos_var.get()
+
+        def worker() -> None:
+            try:
+                result = export_photos_library(
+                    lib_path,
+                    dest_path,
+                    include_videos=include_videos,
+                    progress_cb=self._progress_cb,
+                )
+                self.after(0, lambda: self._on_photos_library_done(result))
+            except Exception as exc:
+                self.after(0, lambda: self._on_error(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_photos_library_done(self, result) -> None:
+        self._append_log(result.summary)
+        if result.errors:
+            self._append_log("--- Erreurs export ---")
+            for path, err in result.errors[:50]:
+                self._append_log(f"  {path.name} : {err}")
+        if result.skipped_missing:
+            self._append_log(
+                f"({len(result.skipped_missing)} fichier(s) absents — "
+                "téléchargez-les dans Photos si besoin)"
+            )
+
+        self.progress["value"] = 0
+        self._set_busy(False)
+
+        if result.copied:
+            self.source_var.set(str(result.destination))
+            remember_paths(source_dir=str(result.destination))
+            self._load_folder_thumbnails(result.destination)
+            self._refresh_inventory_async(result.destination)
+            self.status_var.set(
+                f"Export terminé : {len(result.copied)} fichier(s). "
+                "Source mise à jour — vous pouvez Analyser."
+            )
+            messagebox.showinfo(
+                "Export terminé",
+                f"{len(result.copied)} fichier(s) copiés vers :\n{result.destination}\n\n"
+                "Le dossier source a été mis à jour. Cliquez sur Analyser.",
+            )
+        else:
+            self.status_var.set("Export : aucun fichier copié.")
+            messagebox.showwarning(
+                "Aucun fichier",
+                "Aucun original n'a été copié.\n"
+                "Vérifiez les permissions (Confidentialité > Fichiers et dossiers / Accès disque complet)\n"
+                "et que les photos sont téléchargées localement (pas seulement iCloud).",
+            )
 
     def _append_log(self, text: str) -> None:
         self.log.configure(state=tk.NORMAL)
